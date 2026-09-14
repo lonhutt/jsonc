@@ -376,8 +376,12 @@ func (s *Scanner) scanString() string {
 		case c == '\\':
 			if b == nil {
 				b = &strings.Builder{}
-				b.WriteString(s.text[start:s.pos])
 			}
+			// Flush the literal run since the last escape (or since the
+			// opening quote). This must happen on EVERY escape, not only the
+			// first: start is reset to just past each escape, so skipping the
+			// flush silently drops the text between consecutive escapes.
+			b.WriteString(s.text[start:s.pos])
 			s.pos++
 			if s.pos >= len(s.text) {
 				s.err = ScanUnexpectedEndOfString

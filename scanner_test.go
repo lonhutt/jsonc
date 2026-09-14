@@ -253,3 +253,43 @@ func BenchmarkScanPlainString(b *testing.B) {
 		_ = s.Value()
 	}
 }
+
+// Regression: the literal text BETWEEN two escapes was dropped, because the
+// pending run was flushed only when the builder was first allocated. Any
+// string with two or more escapes silently lost data.
+func TestScanStringMultipleEscapes(t *testing.T) {
+	tests := []struct{ in, want string }{
+		// Single-character escapes with literal runs between them.
+		{`"a\tb\tc"`, "a\tb\tc"},
+		{`"one\ttwo\tthree\tfour"`, "one\ttwo\tthree\tfour"},
+		{`"x\ny\nz"`, "x\ny\nz"},
+		{`"\\a\\b"`, `\a\b`},
+		{`"a\"b\"c"`, `a"b"c`},
+		// \u escapes with literal runs between them: a different writeEscape
+		// path from the single-character escapes above.
+		{`"a\u0042b\u0043c"`, "aBbCc"},
+		{`"a\tb\u00e9"`, "a\tbé"},
+		// Adjacent escapes leave EMPTY runs between them, so this case decodes
+		// correctly even with the flush bug. It is the blind spot that let the
+		// bug survive, kept deliberately as a control -- never mistake it for
+		// coverage of the flush.
+		{`"\u0041\u0042\u0043"`, "ABC"},
+		// Escape at the very start, and at the very end (the final flush then
+		// writes an empty run before the closing quote).
+		{`"\ta\tb"`, "\ta\tb"},
+		{`"a\tb\t"`, "a\tb\t"},
+	}
+	for _, tc := range tests {
+		s := NewScanner(tc.in)
+		if k := s.Scan(); k != StringLiteral {
+			t.Errorf("Scan(%s) = %v, want StringLiteral", tc.in, k)
+			continue
+		}
+		if got := s.Value(); got != tc.want {
+			t.Errorf("Scan(%s).Value() = %q, want %q", tc.in, got, tc.want)
+		}
+		if s.TokenError() != ScanNone {
+			t.Errorf("Scan(%s) error = %v, want ScanNone", tc.in, s.TokenError())
+		}
+	}
+}
