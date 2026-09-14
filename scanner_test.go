@@ -126,3 +126,75 @@ func TestSetPositionResetsLineTracking(t *testing.T) {
 		t.Errorf("after SetPosition(3) over CRLF: line %d col %d, want 1,0", s3.StartLine(), s3.StartColumn())
 	}
 }
+
+func assertValue(t *testing.T, text string, wantKind SyntaxKind, wantValue string, wantErr ScanError) {
+	t.Helper()
+	s := NewScanner(text)
+	k := s.Scan()
+	if k != wantKind {
+		t.Fatalf("scan(%q) kind = %v, want %v", text, k, wantKind)
+	}
+	if s.Value() != wantValue {
+		t.Errorf("scan(%q) value = %q, want %q", text, s.Value(), wantValue)
+	}
+	if s.TokenError() != wantErr {
+		t.Errorf("scan(%q) error = %v, want %v", text, s.TokenError(), wantErr)
+	}
+}
+
+func TestScanStrings(t *testing.T) {
+	assertValue(t, `"hello"`, StringLiteral, "hello", ScanNone)
+	assertValue(t, `""`, StringLiteral, "", ScanNone)
+	assertValue(t, `"\""`, StringLiteral, `"`, ScanNone)
+	assertValue(t, `"\\"`, StringLiteral, `\`, ScanNone)
+	assertValue(t, `"\/"`, StringLiteral, "/", ScanNone)
+	assertValue(t, `"\b\f\n\r\t"`, StringLiteral, "\b\f\n\r\t", ScanNone)
+	assertValue(t, `"é"`, StringLiteral, "é", ScanNone)
+	// Surrogate pair must decode to one rune, not two replacement chars.
+	assertValue(t, `"😀"`, StringLiteral, "😀", ScanNone)
+	// Multi-byte input passes through untouched.
+	assertValue(t, `"héllo"`, StringLiteral, "héllo", ScanNone)
+}
+
+func TestScanStringErrors(t *testing.T) {
+	assertValue(t, `"unterminated`, StringLiteral, "unterminated", ScanUnexpectedEndOfString)
+	// A line break terminates a string: the value stops there.
+	assertValue(t, "\"broken\nrest\"", StringLiteral, "broken", ScanUnexpectedEndOfString)
+	assertValue(t, `"\q"`, StringLiteral, "�", ScanInvalidEscapeCharacter)
+	assertValue(t, `"\u00"`, StringLiteral, "�", ScanInvalidUnicode)
+	// A lone high surrogate yields U+FFFD and an error, not a panic.
+	assertValue(t, `"\ud83d"`, StringLiteral, "�", ScanInvalidUnicode)
+}
+
+func TestScanNumbers(t *testing.T) {
+	assertValue(t, "0", NumericLiteral, "0", ScanNone)
+	assertValue(t, "42", NumericLiteral, "42", ScanNone)
+	assertValue(t, "-1", NumericLiteral, "-1", ScanNone)
+	assertValue(t, "1.5", NumericLiteral, "1.5", ScanNone)
+	assertValue(t, "1e10", NumericLiteral, "1e10", ScanNone)
+	assertValue(t, "-1.5e-10", NumericLiteral, "-1.5e-10", ScanNone)
+	assertValue(t, "1E+2", NumericLiteral, "1E+2", ScanNone)
+	// Value is the RAW source text, not a normalized number.
+	assertValue(t, "1.50", NumericLiteral, "1.50", ScanNone)
+}
+
+func TestScanNumberErrors(t *testing.T) {
+	assertValue(t, "1e", NumericLiteral, "1e", ScanUnexpectedEndOfNumber)
+	assertValue(t, "1.", NumericLiteral, "1.", ScanUnexpectedEndOfNumber)
+	assertValue(t, "-", Unknown, "-", ScanInvalidCharacter)
+}
+
+func TestScanKeywords(t *testing.T) {
+	assertValue(t, "true", TrueKeyword, "true", ScanNone)
+	assertValue(t, "false", FalseKeyword, "false", ScanNone)
+	assertValue(t, "null", NullKeyword, "null", ScanNone)
+	// An unrecognized word is a single Unknown token covering the whole word.
+	assertValue(t, "tru", Unknown, "tru", ScanInvalidCharacter)
+	assertValue(t, "undefined", Unknown, "undefined", ScanInvalidCharacter)
+}
+
+func TestScanLiteralSequence(t *testing.T) {
+	assertKinds(t, `{"a":1}`, OpenBrace, StringLiteral, Colon, NumericLiteral, CloseBrace)
+	assertKinds(t, `[true,false,null]`,
+		OpenBracket, TrueKeyword, Comma, FalseKeyword, Comma, NullKeyword, CloseBracket)
+}

@@ -1,6 +1,10 @@
 package jsonc
 
-import "unicode/utf8"
+import (
+	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
+)
 
 // SyntaxKind identifies a token produced by Scanner.
 type SyntaxKind int
@@ -233,17 +237,53 @@ func (s *Scanner) scanNext() SyntaxKind {
 		case ',':
 			s.pos++
 			s.token = Comma
+		case '"':
+			s.token = StringLiteral
+			s.value = s.scanString()
 		default:
-			// Strings, numbers, keywords, and comments land here until
-			// Tasks 2 and 3. Advance by one rune so an unknown multi-byte
-			// character cannot split and produce invalid UTF-8 slices.
+			if c == '-' || isDigit(c) {
+				if _, ok := s.scanNumber(); ok {
+					s.token = NumericLiteral
+					break
+				}
+				// A bare "-" with no digits is not a number. Advance
+				// past it: a token of zero length would make every
+				// `for k := s.Scan(); k != EOF` loop spin forever.
+				s.pos += runeLenAt(s.text, s.pos)
+				s.token = Unknown
+				s.err = ScanInvalidCharacter
+				break
+			}
+			if isLetter(c) {
+				start := s.pos
+				for s.pos < len(s.text) && isLetter(s.text[s.pos]) {
+					s.pos++
+				}
+				switch s.text[start:s.pos] {
+				case "true":
+					s.token = TrueKeyword
+				case "false":
+					s.token = FalseKeyword
+				case "null":
+					s.token = NullKeyword
+				default:
+					s.token = Unknown
+					s.err = ScanInvalidCharacter
+				}
+				break
+			}
 			s.pos += runeLenAt(s.text, s.pos)
 			s.token = Unknown
+			s.err = ScanInvalidCharacter
 		}
 	}
 
 	s.tokenLength = s.pos - s.tokenOffset
-	s.value = s.text[s.tokenOffset:s.pos]
+	// String values are decoded in scanString; every other token's value is
+	// its raw source text, sliced without allocating.
+	if s.token != StringLiteral {
+		s.value = s.text[s.tokenOffset:s.pos]
+	}
 	return s.token
 }
 
@@ -272,3 +312,190 @@ func runeLenAt(s string, i int) int {
 	}
 	return n
 }
+
+// scanString consumes a quoted string starting at the opening quote and
+// returns its decoded value. It sets s.err on malformed input but always
+// returns a usable value, matching upstream's behavior of reporting an error
+// alongside a result rather than bailing.
+func (s *Scanner) scanString() string {
+	s.pos++ // opening quote
+	start := s.pos
+	var b *strings.Builder // allocated only when an escape is found
+
+	for {
+		if s.pos >= len(s.text) {
+			s.err = ScanUnexpectedEndOfString
+			return s.flush(b, start)
+		}
+		c := s.text[s.pos]
+		switch {
+		case c == '"':
+			out := s.flush(b, start)
+			s.pos++ // closing quote
+			return out
+		case isLineBreak(c):
+			// An unescaped line break terminates the string.
+			s.err = ScanUnexpectedEndOfString
+			return s.flush(b, start)
+		case c == '\\':
+			if b == nil {
+				b = &strings.Builder{}
+				b.WriteString(s.text[start:s.pos])
+			}
+			s.pos++
+			if s.pos >= len(s.text) {
+				s.err = ScanUnexpectedEndOfString
+				return b.String()
+			}
+			s.writeEscape(b)
+			start = s.pos
+		default:
+			s.pos++
+		}
+	}
+}
+
+// flush returns the builder's contents, or a zero-copy slice of the input when
+// no escape was ever encountered.
+func (s *Scanner) flush(b *strings.Builder, start int) string {
+	if b == nil {
+		return s.text[start:s.pos]
+	}
+	b.WriteString(s.text[start:s.pos])
+	return b.String()
+}
+
+// writeEscape consumes one escape sequence (s.pos is just past the backslash)
+// and writes its value to b.
+func (s *Scanner) writeEscape(b *strings.Builder) {
+	c := s.text[s.pos]
+	s.pos++
+	switch c {
+	case '"':
+		b.WriteByte('"')
+	case '\\':
+		b.WriteByte('\\')
+	case '/':
+		b.WriteByte('/')
+	case 'b':
+		b.WriteByte('\b')
+	case 'f':
+		b.WriteByte('\f')
+	case 'n':
+		b.WriteByte('\n')
+	case 'r':
+		b.WriteByte('\r')
+	case 't':
+		b.WriteByte('\t')
+	case 'u':
+		r, ok := s.scanHex4()
+		if !ok {
+			s.err = ScanInvalidUnicode
+			b.WriteRune(utf8.RuneError)
+			return
+		}
+		if utf16.IsSurrogate(rune(r)) {
+			// Try to pair it with a following \uXXXX.
+			if s.pos+1 < len(s.text) && s.text[s.pos] == '\\' && s.text[s.pos+1] == 'u' {
+				save := s.pos
+				s.pos += 2
+				if r2, ok2 := s.scanHex4(); ok2 {
+					if combined := utf16.DecodeRune(rune(r), rune(r2)); combined != utf8.RuneError {
+						b.WriteRune(combined)
+						return
+					}
+				}
+				s.pos = save
+			}
+			s.err = ScanInvalidUnicode
+			b.WriteRune(utf8.RuneError)
+			return
+		}
+		b.WriteRune(rune(r))
+	default:
+		s.err = ScanInvalidEscapeCharacter
+		b.WriteRune(utf8.RuneError)
+	}
+}
+
+// scanHex4 reads up to four hex digits, advancing s.pos past however many
+// valid hex digits it finds and reporting ok=false if fewer than four were
+// found. s.pos always stops at the first non-hex character (or end of text)
+// rather than jumping past it, so a truncated escape like "\u00" (followed
+// immediately by the closing quote) leaves the scanner positioned AT that
+// quote instead of overshooting past it — otherwise the enclosing string
+// scan would run off the end of the text and report
+// ScanUnexpectedEndOfString instead of ScanInvalidUnicode.
+func (s *Scanner) scanHex4() (int, bool) {
+	v := 0
+	digits := 0
+	for digits < 4 && s.pos < len(s.text) {
+		d := hexVal(s.text[s.pos])
+		if d < 0 {
+			break
+		}
+		v = v*16 + d
+		s.pos++
+		digits++
+	}
+	if digits < 4 {
+		return 0, false
+	}
+	return v, true
+}
+
+func hexVal(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
+}
+
+// scanNumber consumes a JSON number and returns its raw source text. It
+// returns ok=false when there is no number at all (a bare "-"). A truncated
+// number such as "1e" returns the text with s.err set, matching upstream.
+func (s *Scanner) scanNumber() (string, bool) {
+	start := s.pos
+	if s.pos < len(s.text) && s.text[s.pos] == '-' {
+		s.pos++
+	}
+	if s.pos >= len(s.text) || !isDigit(s.text[s.pos]) {
+		s.pos = start
+		return "", false
+	}
+	for s.pos < len(s.text) && isDigit(s.text[s.pos]) {
+		s.pos++
+	}
+	if s.pos < len(s.text) && s.text[s.pos] == '.' {
+		s.pos++
+		if s.pos >= len(s.text) || !isDigit(s.text[s.pos]) {
+			s.err = ScanUnexpectedEndOfNumber
+			return s.text[start:s.pos], true
+		}
+		for s.pos < len(s.text) && isDigit(s.text[s.pos]) {
+			s.pos++
+		}
+	}
+	if s.pos < len(s.text) && (s.text[s.pos] == 'e' || s.text[s.pos] == 'E') {
+		s.pos++
+		if s.pos < len(s.text) && (s.text[s.pos] == '+' || s.text[s.pos] == '-') {
+			s.pos++
+		}
+		if s.pos >= len(s.text) || !isDigit(s.text[s.pos]) {
+			s.err = ScanUnexpectedEndOfNumber
+			return s.text[start:s.pos], true
+		}
+		for s.pos < len(s.text) && isDigit(s.text[s.pos]) {
+			s.pos++
+		}
+	}
+	return s.text[start:s.pos], true
+}
+
+func isDigit(c byte) bool  { return c >= '0' && c <= '9' }
+func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
