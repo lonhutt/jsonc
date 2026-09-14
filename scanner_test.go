@@ -198,3 +198,58 @@ func TestScanLiteralSequence(t *testing.T) {
 	assertKinds(t, `[true,false,null]`,
 		OpenBracket, TrueKeyword, Comma, FalseKeyword, Comma, NullKeyword, CloseBracket)
 }
+
+func TestScanComments(t *testing.T) {
+	assertValue(t, "// line", LineComment, "// line", ScanNone)
+	assertValue(t, "//", LineComment, "//", ScanNone)
+	assertValue(t, "/* block */", BlockComment, "/* block */", ScanNone)
+	assertValue(t, "/**/", BlockComment, "/**/", ScanNone)
+	// A line comment stops at the line break; it does not consume it.
+	assertKinds(t, "// c\n{", LineComment, LineBreak, OpenBrace)
+	assertKinds(t, "/* a */{", BlockComment, OpenBrace)
+	// A block comment spanning lines keeps line tracking correct.
+	assertKinds(t, "/* a\nb */{", BlockComment, OpenBrace)
+}
+
+func TestScanCommentErrors(t *testing.T) {
+	assertValue(t, "/* unterminated", BlockComment, "/* unterminated", ScanUnexpectedEndOfComment)
+	// A lone slash is not a comment.
+	assertValue(t, "/", Unknown, "/", ScanInvalidCharacter)
+	assertValue(t, "/x", Unknown, "/", ScanInvalidCharacter)
+}
+
+func TestBlockCommentLineTracking(t *testing.T) {
+	s := NewScanner("/* a\nb */\n{")
+	if k := s.Scan(); k != BlockComment {
+		t.Fatalf("token 1 = %v, want BlockComment", k)
+	}
+	s.Scan() // LineBreak after the comment
+	if k := s.Scan(); k != OpenBrace {
+		t.Fatalf("token 3 = %v, want OpenBrace", k)
+	}
+	// Two line breaks were consumed: one inside the comment, one after it.
+	if s.StartLine() != 2 {
+		t.Errorf("OpenBrace on line %d, want 2", s.StartLine())
+	}
+	if s.StartColumn() != 0 {
+		t.Errorf("OpenBrace at column %d, want 0", s.StartColumn())
+	}
+}
+
+func TestIgnoreTriviaSkipsComments(t *testing.T) {
+	s := NewScanner("{ // c\n }", IgnoreTrivia())
+	if k := s.Scan(); k != OpenBrace {
+		t.Fatalf("token 1 = %v, want OpenBrace", k)
+	}
+	if k := s.Scan(); k != CloseBrace {
+		t.Fatalf("token 2 = %v, want CloseBrace", k)
+	}
+}
+
+func BenchmarkScanPlainString(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		s := NewScanner(`"hello world"`)
+		s.Scan()
+		_ = s.Value()
+	}
+}

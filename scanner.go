@@ -240,6 +240,24 @@ func (s *Scanner) scanNext() SyntaxKind {
 		case '"':
 			s.token = StringLiteral
 			s.value = s.scanString()
+		case '/':
+			if s.pos+1 < len(s.text) && s.text[s.pos+1] == '/' {
+				s.pos += 2
+				for s.pos < len(s.text) && !isLineBreak(s.text[s.pos]) {
+					s.pos++
+				}
+				s.token = LineComment
+				break
+			}
+			if s.pos+1 < len(s.text) && s.text[s.pos+1] == '*' {
+				s.pos += 2
+				s.scanBlockCommentBody()
+				s.token = BlockComment
+				break
+			}
+			s.pos++
+			s.token = Unknown
+			s.err = ScanInvalidCharacter
 		default:
 			if c == '-' || isDigit(c) {
 				if _, ok := s.scanNumber(); ok {
@@ -298,6 +316,24 @@ func (s *Scanner) scanLineBreaks() {
 		s.lineNumber++
 		s.lineStartOffset = s.pos
 	}
+}
+
+// scanBlockCommentBody consumes a block comment body (s.pos is just past the
+// opening "/*"), updating line tracking for any line terminators inside it.
+func (s *Scanner) scanBlockCommentBody() {
+	for s.pos < len(s.text) {
+		c := s.text[s.pos]
+		if c == '*' && s.pos+1 < len(s.text) && s.text[s.pos+1] == '/' {
+			s.pos += 2
+			return
+		}
+		if isLineBreak(c) {
+			s.scanLineBreaks()
+			continue
+		}
+		s.pos += runeLenAt(s.text, s.pos)
+	}
+	s.err = ScanUnexpectedEndOfComment
 }
 
 func isWhitespace(c byte) bool { return c == ' ' || c == '\t' || c == '\v' || c == '\f' }
