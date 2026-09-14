@@ -281,3 +281,84 @@ func BenchmarkVisit(b *testing.B) {
 		Visit(text, Visitor{})
 	}
 }
+
+func TestParseValues(t *testing.T) {
+	tests := []struct {
+		text string
+		want any
+	}{
+		{`1`, float64(1)},
+		{`-1.5e2`, float64(-150)},
+		{`"s"`, "s"},
+		{`true`, true},
+		{`false`, false},
+		{`null`, nil},
+		{`[]`, []any{}},
+		{`{}`, map[string]any{}},
+		{`[1,"a",null]`, []any{float64(1), "a", nil}},
+		{`{"a":1,"b":[true]}`, map[string]any{"a": float64(1), "b": []any{true}}},
+		{`{"a":{"b":{"c":1}}}`, map[string]any{"a": map[string]any{"b": map[string]any{"c": float64(1)}}}},
+		// Comments and trailing commas are the point of the library.
+		{"{\n // c\n \"a\":1\n}", map[string]any{"a": float64(1)}},
+	}
+	for _, tc := range tests {
+		got, errs := Parse(tc.text)
+		if len(errs) != 0 {
+			t.Errorf("Parse(%q) errors = %v, want none", tc.text, errs)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("Parse(%q) = %#v, want %#v", tc.text, got, tc.want)
+		}
+	}
+}
+
+func TestParseMatchesEncodingJSON(t *testing.T) {
+	// For input that is also valid strict JSON, Parse must agree with the
+	// standard library.
+	for _, text := range []string{`{"a":[1,2,{"b":null}],"c":"x"}`, `[]`, `{}`, `3.14`, `"é"`} {
+		var want any
+		if err := json.Unmarshal([]byte(text), &want); err != nil {
+			t.Fatalf("test input %q is not valid JSON: %v", text, err)
+		}
+		got, errs := Parse(text)
+		if len(errs) != 0 {
+			t.Errorf("Parse(%q) errors = %v", text, errs)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("Parse(%q) = %#v, encoding/json = %#v", text, got, want)
+		}
+	}
+}
+
+func TestParseUseNumber(t *testing.T) {
+	got, errs := Parse(`{"big":12345678901234567890}`, UseNumber())
+	if len(errs) != 0 {
+		t.Fatalf("errors = %v", errs)
+	}
+	m := got.(map[string]any)
+	n, ok := m["big"].(json.Number)
+	if !ok {
+		t.Fatalf("value type = %T, want json.Number", m["big"])
+	}
+	if n.String() != "12345678901234567890" {
+		t.Errorf("value = %q, want exact digits preserved", n.String())
+	}
+}
+
+func TestParseIsFaultTolerant(t *testing.T) {
+	// A broken document still yields the parts that parsed.
+	got, errs := Parse(`{"a":1 "b":2}`)
+	if len(errs) == 0 {
+		t.Error("want at least one error")
+	}
+	want := map[string]any{"a": float64(1), "b": float64(2)}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Parse = %#v, want %#v (recovery must keep both properties)", got, want)
+	}
+}
+
+func TestParseNeverReturnsGoError(t *testing.T) {
+	// Deliberate shape check: Parse has exactly two results and the second is
+	// a slice, not an error. This is the library's contract.
+	var _ func(string, ...ParseOption) (any, []ParseError) = Parse
+}

@@ -437,3 +437,91 @@ func (st *visitState) parseArray() bool {
 	}
 	return true
 }
+
+// Parse parses text and returns the value it represents, using the same Go
+// types as json.Unmarshal into an any: map[string]any, []any, string, bool,
+// float64 (or json.Number with UseNumber), and nil.
+//
+// Parsing is fault tolerant. A best-effort value is always returned alongside
+// every recoverable problem found; callers wanting strictness check that the
+// error slice is empty. Object key order is not preserved — use ParseTree when
+// order matters.
+func Parse(text string, opts ...ParseOption) (any, []ParseError) {
+	var (
+		errs   []ParseError
+		result any
+		// stack holds the containers currently open. Each entry is either a
+		// *[]any or a map[string]any.
+		stack   []any
+		keys    []string
+		hasRoot bool
+	)
+
+	// set stores a completed value into the enclosing container, or into
+	// result when there is no enclosing container.
+	set := func(v any) {
+		if len(stack) == 0 {
+			result = v
+			hasRoot = true
+			return
+		}
+		switch top := stack[len(stack)-1].(type) {
+		case *[]any:
+			*top = append(*top, v)
+		case map[string]any:
+			top[keys[len(keys)-1]] = v
+		}
+	}
+
+	push := func(container any) {
+		stack = append(stack, container)
+	}
+
+	pop := func() {
+		done := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if arr, ok := done.(*[]any); ok {
+			set(*arr)
+			return
+		}
+		set(done)
+	}
+
+	Visit(text, Visitor{
+		OnObjectBegin: func(Span) {
+			push(map[string]any{})
+			keys = append(keys, "")
+		},
+		OnObjectProperty: func(name string, _ Span) {
+			keys[len(keys)-1] = name
+		},
+		OnObjectEnd: func(Span) {
+			keys = keys[:len(keys)-1]
+			pop()
+		},
+		OnArrayBegin: func(Span) {
+			arr := make([]any, 0)
+			push(&arr)
+		},
+		OnArrayEnd: func(Span) {
+			pop()
+		},
+		OnLiteralValue: func(v any, _ Span) {
+			set(v)
+		},
+		OnError: func(c ParseErrorCode, s Span) {
+			errs = append(errs, ParseError{
+				Code:      c,
+				Offset:    s.Offset,
+				Length:    s.Length,
+				StartLine: s.StartLine,
+				StartCol:  s.StartCol,
+			})
+		},
+	}, opts...)
+
+	if !hasRoot {
+		return nil, errs
+	}
+	return result, errs
+}
