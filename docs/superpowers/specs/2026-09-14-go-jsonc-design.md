@@ -171,7 +171,7 @@ nine callbacks. In Go that is a footgun, so they collapse into one value:
 type Span struct {
     Offset, Length      int
     StartLine, StartCol int
-    Path                func() Path   // lazily built; never nil
+    Path                func() Path   // snapshotted at Span creation; never nil
 }
 
 type Visitor struct {                  // set only the callbacks you need
@@ -483,8 +483,13 @@ code to this library will hit them.
    when order matters.
 5. **Numbers are `float64` by default**, matching upstream's JS semantics, with
    `UseNumber()` for exact large integers — a gap upstream has no answer for.
-6. **No string interning.**
-7. **Options are variadic functions** (`ParseOption`) rather than partial-option
+6. **An out-of-range number is an error, not `Infinity`.** `1e400` parses to
+   `0` with `InvalidNumberFormat` reported, where upstream's `Number()` yields
+   `Infinity`. `encoding/json` rejects it too, and `+Inf` cannot be marshalled
+   back out, which would break `Modify`'s round-trip. With `UseNumber()` the
+   literal is preserved exactly and no error is reported.
+7. **No string interning.**
+8. **Options are variadic functions** (`ParseOption`) rather than partial-option
    objects. `FormatOptions` stays a struct: five independent knobs, not a set of
    flags.
 
