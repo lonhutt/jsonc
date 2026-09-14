@@ -49,9 +49,6 @@ loose decoders; none has a CST, location API, or comment-preserving edits.
 Import paths remain unique, and a consumer importing two of them aliases one, as
 Go intends.
 
-Note: the working directory is currently `go-jsonc-parser` and must be renamed
-to `jsonc` before the first push, so the directory matches the module path.
-
 ## Architecture
 
 Upstream's layering is followed deliberately. Text is read exactly twice, never
