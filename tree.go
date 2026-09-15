@@ -211,3 +211,82 @@ func literalType(v any) NodeType {
 		return NodeNumber
 	}
 }
+
+// FindNodeAtLocation returns the node at path, or nil if there is none.
+//
+// A malformed path element -- anything other than a string or an int --
+// yields nil, the same as a path that simply does not resolve.
+func FindNodeAtLocation(root *Node, path Path) *Node {
+	node := root
+	for _, seg := range path {
+		if node == nil {
+			return nil
+		}
+		switch key := seg.(type) {
+		case string:
+			if node.Type != NodeObject {
+				return nil
+			}
+			var found *Node
+			for _, prop := range node.Children {
+				if len(prop.Children) == 2 {
+					if k, ok := prop.Children[0].Literal.(string); ok && k == key {
+						found = prop.Children[1]
+						break
+					}
+				}
+			}
+			if found == nil {
+				return nil
+			}
+			node = found
+		case int:
+			if node.Type != NodeArray || key < 0 || key >= len(node.Children) {
+				return nil
+			}
+			node = node.Children[key]
+		default:
+			return nil
+		}
+	}
+	return node
+}
+
+// FindNodeAtOffset returns the innermost node containing offset, or nil.
+//
+// With includeRightBound false a node matches offsets in
+// [Offset, Offset+Length); with it true the range is inclusive at both ends,
+// which is what an editor wants when the caret sits just past a token.
+func FindNodeAtOffset(root *Node, offset int, includeRightBound bool) *Node {
+	if root == nil {
+		return nil
+	}
+	if !nodeContains(root, offset, includeRightBound) {
+		return nil
+	}
+	node := root
+	for {
+		var next *Node
+		for _, c := range node.Children {
+			if nodeContains(c, offset, includeRightBound) {
+				next = c
+				break
+			}
+		}
+		if next == nil {
+			return node
+		}
+		node = next
+	}
+}
+
+func nodeContains(n *Node, offset int, includeRightBound bool) bool {
+	if offset < n.Offset {
+		return false
+	}
+	end := n.Offset + n.Length
+	if includeRightBound {
+		return offset <= end
+	}
+	return offset < end
+}
