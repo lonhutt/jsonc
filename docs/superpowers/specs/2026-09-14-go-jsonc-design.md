@@ -363,8 +363,15 @@ Rules that are not obvious:
   backward to the start of its first line, and the initial indent level is
   derived by scanning the text before it. Otherwise re-indenting a nested block
   would compute depth 0 and flatten it.
-- **EOL is detected, not assumed.** An empty `EOL` means: use the first line
-  terminator in the document, falling back to `"\n"`. A CRLF file stays CRLF.
+- **The document's own line endings always win.** `Format` uses the first line
+  terminator found in the text. `FormatOptions.EOL` applies ONLY when the
+  document contains no terminator at all (a single-line file), and `"\n"` is the
+  final fallback. So formatting a CRLF file with `EOL: "\n"` keeps CRLF.
+  This is upstream's `getEOL` behavior and we match it deliberately: a file's
+  existing endings are a stronger signal than a caller default, and emitting
+  mixed endings inside one file is worse than ignoring a preference.
+  Consequence worth knowing: `Format` cannot be used to CONVERT line endings.
+  Normalize the text first if that is what you want.
 - **`KeepLines` preserves the author's blank lines and breaks**, normalizing only
   indentation. It is how format-on-save avoids fighting deliberate grouping in a
   config file.
