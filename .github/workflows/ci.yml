@@ -19,6 +19,16 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test -race -cover ./...
+
+  staticcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # staticcheck 2026.2.1 needs Go 1.26+ and can't read Go 1.27.2's export
+      # data; bump both together.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.1'
       - run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
 
   fuzz:

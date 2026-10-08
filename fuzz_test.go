@@ -42,6 +42,8 @@ func FuzzParse(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, text string) {
 		v, errs := Parse(text)
+		// GetLocation stops early with a panic it recovers; no other may escape
+		GetLocation(text, len(text)/2)
 		for _, e := range errs {
 			if e.Offset < 0 || e.Length < 0 || e.Offset+e.Length > len(text) || e.StartLine < 0 || e.StartCol < 0 {
 				t.Fatalf("error out of bounds for %d bytes: %+v", len(text), e)

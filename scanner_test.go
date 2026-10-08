@@ -170,8 +170,9 @@ func TestScanStrings(t *testing.T) {
 func TestScanStringErrors(t *testing.T) {
 	assertValue(t, `"unterminated`, StringLiteral, "unterminated", ScanUnexpectedEndOfString)
 	assertValue(t, "\"broken\nrest\"", StringLiteral, "broken", ScanUnexpectedEndOfString)
-	assertValue(t, `"\q"`, StringLiteral, "�", ScanInvalidEscapeCharacter)
-	assertValue(t, `"\u00"`, StringLiteral, "�", ScanInvalidUnicode)
+	// a bad escape adds nothing, as upstream
+	assertValue(t, `"\q"`, StringLiteral, "", ScanInvalidEscapeCharacter)
+	assertValue(t, `"\u00"`, StringLiteral, "", ScanInvalidUnicode)
 	// a lone high surrogate gives U+FFFD and an error, not a panic
 	assertValue(t, `"\ud83d"`, StringLiteral, "�", ScanInvalidUnicode)
 }
@@ -409,4 +410,25 @@ func TestUpstreamTrivia(t *testing.T) {
 	assertUpstreamKinds(t, "\n", LineBreak)
 	assertUpstreamKinds(t, "\n\r", LineBreak, LineBreak)
 	assertUpstreamKinds(t, "\n   \n", LineBreak, Trivia, LineBreak)
+}
+
+// A bad escape adds nothing to the value, as upstream, and takes a whole
+// character, so the value stays valid UTF-8.
+func TestScanBadEscapesAddNothing(t *testing.T) {
+	assertValue(t, "\"\\é\"", StringLiteral, "", ScanInvalidEscapeCharacter)
+	assertValue(t, `"a\qb"`, StringLiteral, "ab", ScanInvalidEscapeCharacter)
+	assertValue(t, `"a\u12g"`, StringLiteral, "ag", ScanInvalidUnicode)
+}
+
+// An escaped line break continues the string onto the next line; later
+// tokens have to report that line. Upstream doesn't count it.
+func TestScanEscapedLineBreakCountsTheLine(t *testing.T) {
+	for _, in := range []string{"[\"a\\\n\", \n x]", "[\"a\\\r\n\", \n x]"} {
+		s := NewScanner(in)
+		for k := s.Scan(); k != EOF; k = s.Scan() {
+			if s.Value() == "x" && (s.StartLine() != 2 || s.StartColumn() != 1) {
+				t.Errorf("%q: x at line %d, column %d; want 2, 1", in, s.StartLine(), s.StartColumn())
+			}
+		}
+	}
 }

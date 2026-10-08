@@ -73,7 +73,7 @@ type ModifyOptions struct {
 
 // Modify returns the edit that sets the value at path, creating missing
 // parents along the way. An empty path replaces the whole document. An index
-// of -1, or one past the end, appends to an array.
+// of -1, or past the end, appends to an array.
 //
 // value is encoded with encoding/json; nil is JSON null, not a deletion.
 func Modify(text string, path Path, value any, o ModifyOptions) ([]Edit, error) {
@@ -209,10 +209,11 @@ func setArrayElement(text string, parent *Node, index int, value any, remove boo
 			e = Edit{Offset: parent.Offset + 1, Length: parent.Length - 2}
 		case index == n-1:
 			// Upstream stops 2 bytes before the array's end, assuming "\n]";
-			// on `[1,2]` that keeps the last digit and gives `[12]`.
+			// that keeps the last digit of `[1,2]` and cuts into a comment
+			// before the ']'.
 			prev, last := children[index-1], children[index]
-			begin := prev.Offset + prev.Length
-			end := max(parent.Offset+parent.Length-2, last.Offset+last.Length)
+			begin, lastEnd := prev.Offset+prev.Length, last.Offset+last.Length
+			end := max(tokenBoundary(text, lastEnd, parent.Offset+parent.Length-2), lastEnd)
 			e = Edit{Offset: begin, Length: end - begin}
 		default:
 			e = Edit{Offset: children[index].Offset, Length: children[index+1].Offset - children[index].Offset}
@@ -245,6 +246,19 @@ func setArrayElement(text string, parent *Node, index int, value any, remove boo
 		e = Edit{Offset: prev.Offset + prev.Length, Content: "," + content}
 	}
 	return withFormatting(text, e, o)
+}
+
+// tokenBoundary returns at, or the start of the token it falls inside,
+// scanning from from.
+func tokenBoundary(text string, from, at int) int {
+	s := NewScanner(text)
+	s.SetPosition(from)
+	for k := s.Scan(); k != EOF && s.Offset() < at; k = s.Scan() {
+		if s.Offset()+s.Length() > at {
+			return s.Offset()
+		}
+	}
+	return at
 }
 
 // marshal is JSON.stringify as near as encoding/json gets; HTML escaping off.

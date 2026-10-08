@@ -591,6 +591,19 @@ func TestModifyGoldenCorpus(t *testing.T) {
 			fail(line, c, "applying %+v: %v", edits, err)
 			continue
 		}
+		if got != c.Applied && format != nil && format.InsertFinalNewline {
+			off := *format
+			off.InsertFinalNewline = false
+			o.Format = &off
+			var without string
+			if e, err := setProperty(c.Text, path, value, c.Remove, o); err == nil {
+				without, _ = ApplyEdits(c.Text, e)
+			}
+			if finalNewlineMidDocument(got, c.Applied, without) {
+				diverged["midNewline"]++
+				continue
+			}
+		}
 		if got != c.Applied {
 			fail(line, c, "\n   got %q\n  want %q", got, c.Applied)
 			continue
@@ -621,10 +634,10 @@ func TestModifyGoldenCorpus(t *testing.T) {
 	if failures > 10 {
 		t.Errorf("%d golden cases differ from upstream %s (first 10 shown)", failures, header.Upstream)
 	}
-	if skipped == 0 || diverged["range"] == 0 || diverged["merge"] == 0 || diverged["negative"] == 0 {
+	if skipped == 0 || diverged["range"] == 0 || diverged["merge"] == 0 || diverged["negative"] == 0 || diverged["midNewline"] == 0 {
 		t.Errorf("a divergence no longer shows up in the corpus (skipped %d, %v); drop its handling if so", skipped, diverged)
 	}
-	t.Logf("replayed %d cases from node-jsonc-parser %s; skipped %d, removal bugs %v", n-skipped, header.Upstream, skipped, diverged)
+	t.Logf("replayed %d cases from node-jsonc-parser %s; skipped %d, divergences %v", n-skipped, header.Upstream, skipped, diverged)
 }
 
 // landingPath is where Modify puts the value: path, except that an array index
@@ -744,4 +757,12 @@ func decodeNumbers(t *testing.T, raw json.RawMessage) any {
 		t.Fatalf("decoding %s: %v", raw, err)
 	}
 	return v
+}
+
+// Upstream stops 2 bytes before the ']', which can land inside a comment there:
+// `[1, 2 /* c */]` becomes `[1/]`.
+func TestRemoveLastBeforeAComment(t *testing.T) {
+	assertRemove(t, "[1, 2 /* c */]", Path{1}, ModifyOptions{}, "[1/* c */]")
+	assertRemove(t, "[1,2/**/]", Path{1}, ModifyOptions{}, "[1/**/]")
+	assertRemove(t, `{"a":[1, 2 /*x*/]}`, Path{"a", 1}, ModifyOptions{}, `{"a":[1/*x*/]}`)
 }

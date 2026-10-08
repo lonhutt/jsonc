@@ -138,12 +138,8 @@ func (s *Scanner) StartLine() int { return s.tokenLineNumber }
 // StartColumn returns the last token's 0-based byte offset within its line.
 func (s *Scanner) StartColumn() int { return s.tokenOffset - s.tokenLineStartOffset }
 
-// SetPosition moves the scanner to pos (negative clamps to 0) and resets
-// token state. Line tracking is recounted from the start of the text, so it's
-// linear in pos; not meant for tight loops.
-//
-// Upstream leaves its line counters alone here, so a backward jump can report
-// a stale line and a negative column; this doesn't.
+// SetPosition moves the scanner to pos and resets token state. It recounts
+// lines from the start of the text, so it's linear in pos.
 func (s *Scanner) SetPosition(pos int) {
 	pos = max(pos, 0)
 	s.pos = pos
@@ -412,8 +408,8 @@ func (s *Scanner) writeEscape(b *strings.Builder) {
 	case 'u':
 		r, ok := s.scanHex4()
 		if !ok {
+			// adds nothing, as upstream
 			s.err = ScanInvalidUnicode
-			b.WriteRune(utf8.RuneError)
 			return
 		}
 		if utf16.IsSurrogate(rune(r)) {
@@ -435,8 +431,18 @@ func (s *Scanner) writeEscape(b *strings.Builder) {
 		}
 		b.WriteRune(rune(r))
 	default:
+		// Adds nothing, as upstream, but takes the whole character so the
+		// value stays valid UTF-8.
 		s.err = ScanInvalidEscapeCharacter
-		b.WriteRune(utf8.RuneError)
+		_, n := utf8.DecodeRuneInString(s.text[s.pos-1:])
+		s.pos += n - 1
+		// An escaped line break keeps the string going onto the next line;
+		// count it, which upstream doesn't. A "\r\n" gets counted when its
+		// "\n" ends the string.
+		if c == '\n' || c == '\r' && (s.pos == len(s.text) || s.text[s.pos] != '\n') {
+			s.lineNumber++
+			s.lineStartOffset = s.pos
+		}
 	}
 }
 

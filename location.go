@@ -1,5 +1,7 @@
 package jsonc
 
+import "errors"
+
 // Path identifies a value in a document; each element is a property name
 // (string) or an array index (int). Any other element is malformed: Modify and
 // Remove return an error, FindNodeAtLocation returns nil, and Location.Matches
@@ -65,23 +67,15 @@ func GetLocation(text string, offset int) Location {
 	var previousNode *Node
 	isAtPropertyKey := false
 
-	// Visit can't be stopped from a callback (upstream throws), so events past
-	// the caret are ignored.
-	done := false
-
 	setPreviousNode := func(value any, offset, length int, t NodeType) {
 		// upstream also tracks colonOffset here; it's never observable
 		previousNode = &Node{Type: t, Literal: value, Offset: offset, Length: length, ColonOffset: -1}
 	}
 
-	Visit(text, Visitor{
+	visitUntilStopped(text, Visitor{
 		OnObjectBegin: func(s Span) bool {
-			if done {
-				return true
-			}
 			if offset <= s.Offset {
-				done = true
-				return true
+				stopVisit()
 			}
 			previousNode = nil
 			isAtPropertyKey = true
@@ -89,74 +83,50 @@ func GetLocation(text string, offset int) Location {
 			return true
 		},
 		OnObjectProperty: func(name string, s Span) {
-			if done {
-				return
-			}
 			if offset < s.Offset {
-				done = true
-				return
+				stopVisit()
 			}
 			setPreviousNode(name, s.Offset, s.Length, NodeProperty)
 			segments[len(segments)-1] = name
 			// a caret right at the end of a key is still on it
 			if offset <= s.Offset+s.Length {
-				done = true
+				stopVisit()
 			}
 		},
 		OnObjectEnd: func(s Span) {
-			if done {
-				return
-			}
 			if offset <= s.Offset {
-				done = true
-				return
+				stopVisit()
 			}
 			previousNode = nil
 			segments = segments[:len(segments)-1]
 		},
 		OnArrayBegin: func(s Span) bool {
-			if done {
-				return true
-			}
 			if offset <= s.Offset {
-				done = true
-				return true
+				stopVisit()
 			}
 			previousNode = nil
 			segments = append(segments, 0)
 			return true
 		},
 		OnArrayEnd: func(s Span) {
-			if done {
-				return
-			}
 			if offset <= s.Offset {
-				done = true
-				return
+				stopVisit()
 			}
 			previousNode = nil
 			segments = segments[:len(segments)-1]
 		},
 		OnLiteralValue: func(v any, s Span) {
-			if done {
-				return
-			}
 			if offset < s.Offset {
-				done = true
-				return
+				stopVisit()
 			}
 			setPreviousNode(v, s.Offset, s.Length, literalType(v))
 			if offset <= s.Offset+s.Length {
-				done = true
+				stopVisit()
 			}
 		},
 		OnSeparator: func(sep string, s Span) {
-			if done {
-				return
-			}
 			if offset <= s.Offset {
-				done = true
-				return
+				stopVisit()
 			}
 			switch {
 			case sep == ":" && previousNode != nil && previousNode.Type == NodeProperty:
@@ -181,4 +151,19 @@ func GetLocation(text string, offset int) Location {
 		Path:            segments,
 		IsAtPropertyKey: isAtPropertyKey,
 	}
+}
+
+// errStopVisit ends a visitUntilStopped early; upstream throws to do the same.
+var errStopVisit = errors.New("jsonc: visit stopped")
+
+func stopVisit() { panic(errStopVisit) }
+
+// visitUntilStopped is Visit, except a callback can end it with stopVisit.
+func visitUntilStopped(text string, v Visitor) {
+	defer func() {
+		if r := recover(); r != nil && r != errStopVisit {
+			panic(r)
+		}
+	}()
+	Visit(text, v)
 }

@@ -1024,6 +1024,17 @@ func isASCII(s string) bool {
 	return true
 }
 
+// finalNewlineMidDocument reports whether upstream's answer differs from ours
+// only by the final newline it puts at the end of a range's last line when
+// that isn't the document's end: ours matches formatting with
+// InsertFinalNewline off, and upstream's has exactly one more line break.
+func finalNewlineMidDocument(ours, upstream, withoutFinalNewline string) bool {
+	breaks := func(s string) int {
+		return strings.Count(s, "\n") + strings.Count(s, "\r") - strings.Count(s, "\r\n")
+	}
+	return ours == withoutFinalNewline && breaks(upstream) == breaks(ours)+1
+}
+
 // TestFormatGoldenCorpus replays node-jsonc-parser's recorded output from
 // testdata/format-golden.jsonl. Everything else here holds for any sane
 // whitespace rewriter; this is the test that fails when we drift from
@@ -1055,7 +1066,7 @@ func TestFormatGoldenCorpus(t *testing.T) {
 		t.Fatalf("golden corpus header looks wrong: %+v", header)
 	}
 
-	failures, n := 0, 0
+	failures, n, midNewline := 0, 0, 0
 	for line := 2; sc.Scan(); line++ {
 		var c goldenCase
 		if err := json.Unmarshal(sc.Bytes(), &c); err != nil {
@@ -1095,6 +1106,15 @@ func TestFormatGoldenCorpus(t *testing.T) {
 				bad = true
 			}
 		}
+		if bad && o.InsertFinalNewline {
+			off := o
+			off.InsertFinalNewline = false
+			without, _ := applyEditsForTest(c.Text, Format(c.Text, rr, off))
+			if finalNewlineMidDocument(got, c.Applied, without) {
+				midNewline++
+				continue
+			}
+		}
 		if bad {
 			failures++
 			if failures <= 10 {
@@ -1112,7 +1132,10 @@ func TestFormatGoldenCorpus(t *testing.T) {
 	if failures > 10 {
 		t.Errorf("%d golden cases differ from upstream %s (first 10 shown)", failures, header.Upstream)
 	}
-	t.Logf("replayed %d cases recorded from node-jsonc-parser %s", n, header.Upstream)
+	if midNewline == 0 {
+		t.Error("no case hit finalNewlineMidDocument; drop it if the corpus changed")
+	}
+	t.Logf("replayed %d cases recorded from node-jsonc-parser %s; %d mid-document final newlines", n, header.Upstream, midNewline)
 }
 
 // TestFormatPropertiesForRanges runs the structural checks over every range
@@ -1205,5 +1228,26 @@ func TestUpstreamFormat(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%s:\n got %q\nwant %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// A range's scan stops at the end of its last line, which isn't the end of
+// the document; the final newline only belongs at the real end. Upstream adds
+// it there anyway, a blank line mid-document.
+func TestFormatRangeFinalNewlineOnlyAtTheEnd(t *testing.T) {
+	in := "{\n    \"a\": 1,   \n    \"b\": 2\n}\n"
+	o := FormatOptions{TabSize: 4, InsertSpaces: true, InsertFinalNewline: true}
+	got, _ := applyEditsForTest(in, Format(in, &Range{Offset: 6, Length: 10}, o))
+	if want := "{\n    \"a\": 1,\n    \"b\": 2\n}\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	m := ModifyOptions{Format: &o}
+	edits, err := Modify(in, Path{"c"}, 3, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ = applyEditsForTest(in, edits)
+	if want := "{\n    \"a\": 1,   \n    \"b\": 2,\n    \"c\": 3\n}\n"; got != want {
+		t.Errorf("Modify: got %q, want %q", got, want)
 	}
 }

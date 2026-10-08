@@ -137,9 +137,16 @@ weren't worth copying.
 - **`Format` with `KeepLines`** gives a document's leading line breaks as one
   edit, and leaves a document with no tokens alone; upstream adds the breaks
   again on every pass.
-- **Array edits don't corrupt.** Upstream turns `[1,2]` into `[12]` when
-  removing the last element, and crashes or inserts `undefined` for an index
-  outside the array; those are an error here.
+- **Array edits don't corrupt.** Removing the last element, upstream turns
+  `[1,2]` into `[12]` and `[1, 2 /* c */]` into `[1/]`. Removing at an index
+  outside the array crashes or inserts `undefined`; that's an error here.
+- **A range only gets the final newline at the real end.** With
+  `InsertFinalNewline`, upstream adds a line break at the end of a range's
+  last line wherever that is, which leaves a blank line mid-document; so does
+  `Modify` with `Format`.
+- **An escaped line break counts as a line.** In a string, `\` before a line
+  break keeps the string going; upstream doesn't count that line, so every
+  later token's line is one short.
 - **`Format` doesn't merge tokens.** Upstream joins an unterminated string with
   whatever's on the next line (`{"a\n:1}` becomes `{"a: 1}`), and formats a
   range that starts inside a multi-line comment or string as if its tail were

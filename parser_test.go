@@ -745,3 +745,14 @@ func TestVisitSkipCountsDepthWithoutBeginCallbacks(t *testing.T) {
 		t.Errorf("got %v, want %v", ends, want)
 	}
 }
+
+// "1." keeps its value as 1, as upstream; json.Number("1.") wouldn't marshal.
+func TestParseUseNumberTruncatedDecimal(t *testing.T) {
+	v, _ := Parse("[1.]", UseNumber())
+	if !reflect.DeepEqual(v, arr{json.Number("1")}) {
+		t.Errorf("got %#v", v)
+	}
+	if _, err := json.Marshal(v); err != nil {
+		t.Error(err)
+	}
+}

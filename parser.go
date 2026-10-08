@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // ParseErrorCode identifies a recoverable parse problem. Codes start at 1.
@@ -108,10 +109,36 @@ type Span struct {
 	Offset, Length int
 	StartLine      int // 0-based
 	StartCol       int // 0-based, in bytes
-	// Path returns the JSON path at the event; never nil. It's a snapshot, so
-	// it stays right however long the Span is held. Every call returns the same
-	// slice; copy it before modifying.
-	Path func() Path
+	path           *pathNode
+}
+
+// Path returns the JSON path at the event, as of the event however long the
+// Span is held. Never nil; each call returns a new slice.
+func (s Span) Path() Path {
+	if s.path == nil {
+		return Path{}
+	}
+	out := make(Path, s.path.depth)
+	for n := s.path; n != nil; n = n.parent {
+		out[n.depth-1] = n.seg
+	}
+	return out
+}
+
+// pathNode is one segment of a path. Nodes are never changed once made, so a
+// Span keeps a pointer instead of a copy of the path.
+type pathNode struct {
+	parent *pathNode
+	seg    any
+	depth  int
+}
+
+func (n *pathNode) push(seg any) *pathNode {
+	depth := 1
+	if n != nil {
+		depth = n.depth + 1
+	}
+	return &pathNode{parent: n, seg: seg, depth: depth}
 }
 
 // Visitor holds Visit's callbacks; all optional. A Begin callback that
@@ -130,11 +157,10 @@ type Visitor struct {
 }
 
 type visitState struct {
-	s   *Scanner
-	v   Visitor
-	cfg parseConfig
-	// path is live; keys and indices are overwritten in place as parsing moves.
-	path Path
+	s    *Scanner
+	v    Visitor
+	cfg  parseConfig
+	path *pathNode // where parsing is; nil at the top
 	// skipped counts the open containers inside one a Begin callback skipped.
 	skipped int
 }
@@ -189,15 +215,12 @@ func Visit(text string, v Visitor, opts ...ParseOption) bool {
 }
 
 func (st *visitState) span() Span {
-	// copy now; the closure mustn't see later changes to the live path
-	snapshot := make(Path, len(st.path))
-	copy(snapshot, st.path)
 	return Span{
 		Offset:    st.s.Offset(),
 		Length:    st.s.Length(),
 		StartLine: st.s.StartLine(),
 		StartCol:  st.s.StartColumn(),
-		Path:      func() Path { return snapshot },
+		path:      st.path,
 	}
 }
 
@@ -284,7 +307,8 @@ func (st *visitState) parseLiteral() bool {
 		raw := st.s.Value()
 		var value any
 		if st.cfg.useNumber {
-			value = json.Number(raw)
+			// "1." is 1, as upstream; json.Number("1.") won't marshal
+			value = json.Number(strings.TrimSuffix(raw, "."))
 			// Only a syntax error invalidates a json.Number. 1e400 overflows
 			// float64 but the digits are still exact, which is the point of
 			// UseNumber; encoding/json keeps it too.
@@ -345,7 +369,7 @@ func (st *visitState) parseProperty() bool {
 		st.v.OnObjectProperty(name, st.span())
 	}
 	// after the property event, which gets the object's path, as upstream
-	st.path = append(st.path, name)
+	st.path = st.path.push(name)
 	st.scanNext()
 
 	if st.s.Token() == Colon {
@@ -357,7 +381,7 @@ func (st *visitState) parseProperty() bool {
 	} else {
 		st.handleError(ColonExpected, nil, []SyntaxKind{CloseBrace, Comma})
 	}
-	st.path = st.path[:len(st.path)-1]
+	st.path = st.path.parent
 	return true
 }
 
@@ -415,9 +439,9 @@ func (st *visitState) parseArray() bool {
 			st.handleError(CommaExpected, nil, nil)
 		}
 		if index++; index == 0 {
-			st.path = append(st.path, 0)
+			st.path = st.path.push(0)
 		} else {
-			st.path[len(st.path)-1] = index
+			st.path = st.path.parent.push(index)
 		}
 		if !st.parseValue() {
 			st.handleError(ValueExpected, nil, []SyntaxKind{CloseBracket, Comma})
@@ -426,7 +450,7 @@ func (st *visitState) parseArray() bool {
 	}
 
 	if index >= 0 {
-		st.path = st.path[:len(st.path)-1]
+		st.path = st.path.parent
 	}
 	st.end(st.v.OnArrayEnd)
 	if st.s.Token() != CloseBracket {

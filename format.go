@@ -100,20 +100,9 @@ type formatter struct {
 	hasError bool
 }
 
-// Format returns the edits that reformat text; only whitespace between tokens
-// changes, and a formatted document gives no edits. A nil Range formats the
-// whole document. Otherwise only edits overlapping the range come back, and the
-// range is widened to whole lines so depth and indent come from the text before
-// it.
-//
-// A nil Range isn't the same as &Range{0, len(text)}; the range form takes its
-// starting indent from the first line, as upstream does:
-//
-//	Format("     {\"a\":1}", nil, o)           -> "{\n  \"a\": 1\n}"
-//	Format("     {\"a\":1}", &Range{0, 12}, o) -> "    {\n      \"a\": 1\n    }"
-//
-// Edit content is O(depth^2); a 20,000-deep document is ~800MB of indent
-// strings. Bound nesting depth before formatting untrusted input.
+// Format returns the edits that reformat text, or with r, the lines r touches.
+// Only whitespace between tokens changes. A range takes its starting indent
+// from its first line, so it isn't the same as a nil r.
 func Format(text string, r *Range, o FormatOptions) []Edit {
 	f := &formatter{
 		text:       text,
@@ -217,9 +206,6 @@ func (f *formatter) addEdit(content string, start, end int) {
 		return
 	}
 	if f.hasRange && !((start < f.rangeEnd || f.pastEnd && start == len(f.text)) && end > f.rangeStart) {
-		return
-	}
-	if start < 0 || end > len(f.text) || start > end {
 		return
 	}
 	if f.text[start:end] == content {
@@ -385,7 +371,9 @@ func (f *formatter) run() {
 			switch {
 			case keptBreak:
 				replaceContent = f.newLinesAndIndent()
-			case f.o.InsertFinalNewline:
+			// A range's scan stops at its last line's end, which may not be
+			// the document's; upstream puts the final newline there anyway.
+			case f.o.InsertFinalNewline && f.delta+len(f.scanText) == len(f.text):
 				replaceContent = f.eol
 			default:
 				replaceContent = ""
