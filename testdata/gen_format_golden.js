@@ -62,6 +62,14 @@ const documents = [
 	'{\n  "a": {"b":1}\n}', '{\n\t"a": {"b":1}\n}', '{"x":1,\n  "b"  :  2,\n  "c":3}',
 	'{"a":1}  \nTAIL', 'x\n{"a":1}\n  junk', '{\n   "a":1\n}', '{\n     "a":1\n}',
 	'     {"a":1}',
+	// Blank lines, leading and trailing breaks, and one-line layouts: what
+	// KeepLines and InsertFinalNewline act on.
+	'{\n"a": 1,\n\n"b": 2\n}', '{\n"a": 1,\n\n\n\n"b": 2\n}', '{\r\n\r\n"a":1\r\n}',
+	'{\n  \n"a":1}', '\n\n{"a":1}', '\r\n\r\n  {"a":1}', '{"a":1}\n\n\n', '{"a":1}  \n\n',
+	'{"a":1, "b":2}', '{\n    "a": 1, "b": 2\n}', '[\n1, 2,\n\n3\n]', '{"a":\n\n1}',
+	'{"a"\n:1}', '[1\n,2]', '{\n\n// c\n\n"a":1}', '{"a":1 // c\n\n}',
+	'{"a":{\n"b":1}}', '{\n\n}', '[\n\n]', '\n\n', '  \n\n  ', '{\r"a":1\r\r}',
+	'{"a":1}\r\n', '[1]\n\r\n',
 ];
 
 // Named so a failing case reads as something other than a number.
@@ -73,6 +81,10 @@ const optionSets = [
 	['spaces8', { TabSize: 8, InsertSpaces: true, EOL: '\n' }],
 	['crlfOpt', { TabSize: 2, InsertSpaces: true, EOL: '\r\n' }],
 	['defaults', { TabSize: 4, InsertSpaces: true, EOL: '\n' }],
+	['keepLines', { TabSize: 2, InsertSpaces: true, EOL: '\n', KeepLines: true }],
+	['keepTabs', { TabSize: 4, InsertSpaces: false, EOL: '', KeepLines: true }],
+	['finalNL', { TabSize: 2, InsertSpaces: true, EOL: '\n', InsertFinalNewline: true }],
+	['keepFinal', { TabSize: 2, InsertSpaces: true, EOL: '\r\n', KeepLines: true, InsertFinalNewline: true }],
 ];
 
 // Range shapes: whole document, a prefix, a mid-document span, an empty range,
@@ -101,7 +113,13 @@ function main() {
 				const edits = j.format(
 					text,
 					r ? { offset: r.Offset, length: r.Length } : undefined,
-					{ tabSize: o.TabSize, insertSpaces: o.InsertSpaces, eol: o.EOL }
+					{
+						tabSize: o.TabSize,
+						insertSpaces: o.InsertSpaces,
+						eol: o.EOL,
+						keepLines: !!o.KeepLines,
+						insertFinalNewline: !!o.InsertFinalNewline,
+					}
 				);
 				const c = {
 					opts: optName,

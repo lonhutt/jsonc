@@ -3,7 +3,7 @@
 ## format-golden.jsonl
 
 The exact output of the real [node-jsonc-parser](https://github.com/microsoft/node-jsonc-parser)
-`format()` for 3675 cases: 90 documents x 7 option sets x 6 range shapes.
+`format()` for 7337 cases: 114 documents x 11 option sets x 6 range shapes.
 `TestFormatGoldenCorpus` replays it, so our `Format` cannot drift from
 upstream's answers without failing `go test`. **No node is needed to run the
 tests** — the answers are frozen here.

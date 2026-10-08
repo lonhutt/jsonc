@@ -26,12 +26,14 @@ type FormatOptions struct {
 	// no terminator at all means "\n".
 	EOL string
 
-	// InsertFinalNewline and KeepLines are accepted but not yet implemented.
-	// Until they are, trailing whitespace at the end of the document is always
-	// removed, and the author's line breaks are never preserved.
+	// InsertFinalNewline ends a document that has at least one token with
+	// exactly one EOL. Without it, trailing whitespace is removed entirely.
 	InsertFinalNewline bool
-	// KeepLines preserves the author's existing line breaks and blank lines,
-	// normalizing only indentation.
+
+	// KeepLines preserves the author's line breaks, blank lines included, and
+	// normalizes only indentation. Tokens the author put on one line stay on
+	// one line, separated by a single space -- so `{"a":1}` becomes
+	// `{ "a": 1 }`, as it does upstream.
 	KeepLines bool
 }
 
@@ -88,6 +90,10 @@ type formatter struct {
 	// [rangeStart, rangeEnd) are discarded.
 	hasRange             bool
 	rangeStart, rangeEnd int
+	// pastEnd reports that the requested range ran beyond the text. rangeEnd
+	// is clamped, but upstream's is not, so its range then still overlaps an
+	// insertion AT the end of the text: the final newline.
+	pastEnd bool
 
 	// scanText is the slice of text being scanned: for a range, the lines the
 	// range touches. delta is its offset within text, so scanner offsets plus
@@ -98,6 +104,8 @@ type formatter struct {
 	s     *Scanner
 	edits []Edit
 
+	// numberLineBreaks is how many line terminators preceded the current
+	// token: at most 1 unless KeepLines, which needs the real count.
 	numberLineBreaks int
 	indentLevel      int
 	initialIndent    int
@@ -150,6 +158,7 @@ func Format(text string, r *Range, o FormatOptions) []Edit {
 		// wraps negative, and clamping the wrapped sum would silently collapse
 		// the range to nothing where the caller plainly meant "to the end".
 		f.rangeEnd = f.rangeStart + clamp(r.Length, 0, len(text)-f.rangeStart)
+		f.pastEnd = r.Length > len(text)-f.rangeStart
 
 		// Widen backward to the start of the line: the initial indent has to be
 		// read from the text in front of the range, or a nested block would be
@@ -207,7 +216,7 @@ func (f *formatter) addEdit(content string, start, end int) {
 	if f.hasError {
 		return
 	}
-	if f.hasRange && !(start < f.rangeEnd && end > f.rangeStart) {
+	if f.hasRange && !((start < f.rangeEnd || f.pastEnd && start == len(f.text)) && end > f.rangeStart) {
 		return
 	}
 	if start < 0 || end > len(f.text) || start > end {
@@ -227,9 +236,11 @@ func (f *formatter) scanNext() SyntaxKind {
 	f.numberLineBreaks = 0
 	for token == Trivia || token == LineBreak {
 		if token == LineBreak {
-			// Task 11 (KeepLines) counts the breaks; until then all that
-			// matters is whether there was one.
-			f.numberLineBreaks = 1
+			if f.o.KeepLines {
+				f.numberLineBreaks += countLineBreaks(f.scanText[f.s.Offset() : f.s.Offset()+f.s.Length()])
+			} else {
+				f.numberLineBreaks = 1
+			}
 		}
 		token = f.s.Scan()
 	}
@@ -246,8 +257,22 @@ func (f *formatter) indent(level int) string {
 	return strings.Repeat(f.indentUnit, level)
 }
 
-func (f *formatter) newLineAndIndent() string {
-	return f.eol + f.indent(f.initialIndent+f.indentLevel)
+// countLineBreaks counts the terminators in a LineBreak token. Our scanner
+// emits one token per RUN of terminators where upstream emits one per
+// terminator, so KeepLines has to count inside the token or every blank line
+// is lost. "\r\n" is one terminator.
+func countLineBreaks(run string) int {
+	n := 0
+	for i := 0; i < len(run); i++ {
+		if run[i] == '\n' || i+1 == len(run) || run[i+1] != '\n' {
+			n++
+		}
+	}
+	return n
+}
+
+func (f *formatter) newLinesAndIndent() string {
+	return strings.Repeat(f.eol, max(f.numberLineBreaks, 1)) + f.indent(f.initialIndent+f.indentLevel)
 }
 
 // tokenStart and tokenEnd are document offsets for the current token.
@@ -260,8 +285,21 @@ func (f *formatter) run() {
 		return
 	}
 
-	// Indentation before the very first token.
-	f.addEdit(f.indent(f.initialIndent), f.delta, f.tokenStart())
+	// Indentation before the very first token, plus, with KeepLines, the
+	// author's leading line breaks.
+	//
+	// Upstream inserts those breaks at offset 0 as a separate edit, which goes
+	// wrong two ways we do not copy: an already-formatted document gets a no-op
+	// insert/delete pair at the same offset on every pass, and a document with
+	// no tokens gets its breaks inserted again each time it is formatted.
+	// One edit over the whole gap gives the same text for every document that
+	// has a token. Like upstream, a range never keeps leading breaks: its
+	// insertion at offset 0 can never overlap a range.
+	leading := f.indent(f.initialIndent)
+	if f.o.KeepLines && f.numberLineBreaks > 0 && !f.hasRange {
+		leading = strings.Repeat(f.eol, f.numberLineBreaks) + leading
+	}
+	f.addEdit(leading, f.delta, f.tokenStart())
 
 	for firstToken != EOF {
 		firstEnd := f.tokenEnd()
@@ -279,51 +317,73 @@ func (f *formatter) run() {
 			firstEnd = f.tokenEnd()
 			needsLineBreak = secondToken == LineComment
 			if needsLineBreak {
-				replaceContent = f.newLineAndIndent()
+				replaceContent = f.newLinesAndIndent()
 			} else {
 				replaceContent = ""
 			}
 			secondToken = f.scanNext()
 		}
 
-		switch secondToken {
-		case CloseBrace:
-			// An empty object stays on one line.
-			if firstToken != OpenBrace {
-				f.indentLevel--
-				replaceContent = f.newLineAndIndent()
+		// keptBreak: KeepLines is on and the author broke the line here, so
+		// the break stays whatever the token rules below would have said.
+		keptBreak := f.o.KeepLines && f.numberLineBreaks > 0
+		// separator is the gap after '{', '[' or ',': a line break normally;
+		// with KeepLines, the author's break or a single space.
+		separator := func() string {
+			if keptBreak || !f.o.KeepLines {
+				return f.newLinesAndIndent()
 			}
-		case CloseBracket:
-			if firstToken != OpenBracket {
+			return " "
+		}
+
+		switch secondToken {
+		case CloseBrace, CloseBracket:
+			opener := OpenBrace
+			if secondToken == CloseBracket {
+				opener = OpenBracket
+			}
+			if firstToken != opener {
 				f.indentLevel--
-				replaceContent = f.newLineAndIndent()
+			}
+			// An empty container stays on one line: `{}`, or `{ }` with
+			// KeepLines.
+			if keptBreak || !f.o.KeepLines && firstToken != opener {
+				replaceContent = f.newLinesAndIndent()
+			} else if f.o.KeepLines {
+				replaceContent = " "
 			}
 		default:
 			switch firstToken {
 			case OpenBrace, OpenBracket:
 				f.indentLevel++
-				replaceContent = f.newLineAndIndent()
+				replaceContent = separator()
 			case Comma:
-				replaceContent = f.newLineAndIndent()
+				replaceContent = separator()
 			case LineComment:
-				replaceContent = f.newLineAndIndent()
+				replaceContent = f.newLinesAndIndent()
 			case BlockComment:
 				if f.numberLineBreaks > 0 {
-					replaceContent = f.newLineAndIndent()
+					replaceContent = f.newLinesAndIndent()
 				} else if !needsLineBreak {
 					replaceContent = " "
 				}
 			case Colon:
-				if !needsLineBreak {
+				if keptBreak {
+					replaceContent = f.newLinesAndIndent()
+				} else if !needsLineBreak {
 					replaceContent = " "
 				}
 			case StringLiteral:
-				if secondToken == Colon && !needsLineBreak {
+				if keptBreak {
+					replaceContent = f.newLinesAndIndent()
+				} else if secondToken == Colon && !needsLineBreak {
 					replaceContent = ""
 				}
 			case NullKeyword, TrueKeyword, FalseKeyword, NumericLiteral,
 				CloseBrace, CloseBracket:
-				if (secondToken == LineComment || secondToken == BlockComment) && !needsLineBreak {
+				if keptBreak {
+					replaceContent = f.newLinesAndIndent()
+				} else if (secondToken == LineComment || secondToken == BlockComment) && !needsLineBreak {
 					replaceContent = " "
 				} else if secondToken != Comma && secondToken != EOF {
 					// Two values with nothing but whitespace between them is
@@ -342,13 +402,19 @@ func (f *formatter) run() {
 			// put on its own line. Only this check can tell them apart,
 			// because only it looks at what was between them.
 			if f.numberLineBreaks > 0 && (secondToken == LineComment || secondToken == BlockComment) {
-				replaceContent = f.newLineAndIndent()
+				replaceContent = f.newLinesAndIndent()
 			}
 		}
 
 		if secondToken == EOF {
-			// TODO(task 11): InsertFinalNewline makes this f.eol.
-			replaceContent = ""
+			switch {
+			case keptBreak:
+				replaceContent = f.newLinesAndIndent()
+			case f.o.InsertFinalNewline:
+				replaceContent = f.eol
+			default:
+				replaceContent = ""
+			}
 		}
 
 		f.addEdit(replaceContent, firstEnd, f.tokenStart())

@@ -70,7 +70,14 @@ func tokenSignature(text string) []string {
 		if k == Trivia || k == LineBreak {
 			continue
 		}
-		out = append(out, k.String()+":"+text[s.Offset():s.Offset()+s.Length()])
+		src := text[s.Offset() : s.Offset()+s.Length()]
+		if s.TokenError() == ScanUnexpectedEndOfComment {
+			// An unterminated block comment runs to EOF, so the gap after it
+			// is inside it: InsertFinalNewline and KeepLines write there, as
+			// upstream does. Only its trailing whitespace may change.
+			src = strings.TrimRight(src, " \t\r\n\v\f")
+		}
+		out = append(out, k.String()+":"+src)
 	}
 }
 
@@ -710,9 +717,15 @@ func TestFormatEditsAreStructurallyValid(t *testing.T) {
 		"colons only":         "::::",
 		"crlf nested":         "{\r\n\"a\":[\r\n1,\r\n2]\r\n}",
 		"lone cr nested":      "{\r\"a\":[\r1,\r2]\r}",
+		"leading breaks":      "\n\r\n\n  {\n\n\"a\":1}\n\n",
 		"realistic":           "{\n  // c\n  \"a\": [1, 2, {\"b\": null}],\n  \"c\": \"d\" /* x */\n}",
 	}
-	options := map[string]FormatOptions{"spaces2": spaces2(), "tabs4": tabs4(), "zero": {}}
+	options := map[string]FormatOptions{
+		"spaces2":   spaces2(),
+		"tabs4":     tabs4(),
+		"zero":      {},
+		"keepFinal": {TabSize: 2, InsertSpaces: true, KeepLines: true, InsertFinalNewline: true},
+	}
 
 	for docName, in := range docs {
 		rs := []*Range{
@@ -780,24 +793,97 @@ func rangeString(r *Range) string {
 
 func itoa(i int) string { return strconv.Itoa(i) }
 
-// --- Task 11 options are accepted and ignored ----------------------------
+// --- KeepLines and InsertFinalNewline ---------------------------------------
 
-func TestFormatIgnoresKeepLinesAndInsertFinalNewline(t *testing.T) {
-	base := spaces2()
-	keep := base
-	keep.KeepLines = true
-	final := base
-	final.InsertFinalNewline = true
+// Expected strings below come from node-jsonc-parser 3.3.1, not from reasoning.
 
-	in := "{\n\n  \"a\":1,\n\n  \"b\":2\n}\n"
-	want := Format(in, nil, base)
-	for name, o := range map[string]FormatOptions{"KeepLines": keep, "InsertFinalNewline": final} {
-		if got := Format(in, nil, o); !reflect.DeepEqual(got, want) {
-			t.Errorf("%s is implemented in task 10 but must be ignored until task 11:\n got %+v\nwant %+v", name, got, want)
+func keepLines2() FormatOptions {
+	o := spaces2()
+	o.KeepLines = true
+	return o
+}
+
+func TestFormatKeepLines(t *testing.T) {
+	o := keepLines2()
+	// One-line layout stays on one line; only indentation is normalized.
+	assertFormat(t, "{\n    \"a\": 1, \"b\": 2\n}", "{\n  \"a\": 1, \"b\": 2\n}", o)
+	// Tokens sharing a line are separated by a space, braces included.
+	assertFormat(t, `{"a":1, "b":2}`, `{ "a": 1, "b": 2 }`, o)
+	assertFormat(t, `{}`, `{ }`, o)
+	assertFormat(t, `[]`, `[ ]`, o)
+	assertFormat(t, "{\n}", "{\n}", o)
+}
+
+func TestFormatKeepLinesBlankLines(t *testing.T) {
+	o := keepLines2()
+	// Blank lines are kept, every one of them: upstream does not cap the run.
+	assertFormat(t, "{\n\"a\": 1,\n\n\"b\": 2\n}", "{\n  \"a\": 1,\n\n  \"b\": 2\n}", o)
+	assertFormat(t, "{\n\"a\": 1,\n\n\n\n\"b\": 2\n}", "{\n  \"a\": 1,\n\n\n\n  \"b\": 2\n}", o)
+	// Our scanner emits ONE LineBreak token per run of terminators; the count
+	// has to come from inside it, with CRLF as one terminator.
+	assertFormat(t, "{\r\n\r\n\"a\":1}", "{\r\n\r\n  \"a\": 1 }", o)
+	assertFormat(t, "{\r\"a\":1\r\r}", "{\r  \"a\": 1\r\r}", o)
+	// Whitespace between breaks does not merge them.
+	assertFormat(t, "{\n  \n\"a\":1}", "{\n\n  \"a\": 1 }", o)
+	// Breaks the default mode would remove are kept, re-indented.
+	assertFormat(t, "{\"a\":\n\n1}", "{ \"a\":\n\n  1 }", o)
+	assertFormat(t, "[1\n,2]", "[ 1\n  , 2 ]", o)
+	// Trailing breaks are kept too.
+	assertFormat(t, "{\"a\":1}\n\n\n", "{ \"a\": 1 }\n\n\n", o)
+}
+
+func TestCountLineBreaks(t *testing.T) {
+	for run, want := range map[string]int{
+		"\n": 1, "\r": 1, "\r\n": 1, "\n\n": 2, "\r\r": 2, "\n\r": 2,
+		"\r\n\r\n": 2, "\r\r\n": 2, "\n\r\n\r": 3,
+	} {
+		if got := countLineBreaks(run); got != want {
+			t.Errorf("countLineBreaks(%q) = %d, want %d", run, got, want)
 		}
 	}
-	// Without InsertFinalNewline, trailing whitespace at the end of the
-	// document is removed -- including a final newline.
+}
+
+// Upstream emits the leading breaks as an insertion at offset 0 plus a
+// deletion of the gap. We emit one edit over the gap instead, which is
+// minimal and gives the same text. See the comment in formatter.run.
+func TestFormatKeepLinesLeadingBreaks(t *testing.T) {
+	o := keepLines2()
+	assertFormat(t, "\n\n  {\"a\":1}", "\n\n{ \"a\": 1 }", o)
+	if got, want := Format("\n\n  {}", nil, o), []Edit{{Offset: 0, Length: 4, Content: "\n\n"}, {Offset: 5, Length: 0, Content: " "}}; !editsEqual(got, want) {
+		t.Errorf("leading edits:\n got %+v\nwant %+v", got, want)
+	}
+	// Already formatted: no edits at all (upstream emits a no-op pair).
+	if got := Format("\n\n{\n  \"a\": 1\n}", nil, o); len(got) != 0 {
+		t.Errorf("already formatted, got edits %+v", got)
+	}
+	// No tokens: left alone (upstream inserts the breaks again on every pass).
+	for _, in := range []string{"\n\n", "  \n\n  "} {
+		if got := Format(in, nil, o); len(got) != 0 {
+			t.Errorf("Format(%q) = %+v, want no edits", in, got)
+		}
+	}
+	// A range never keeps leading breaks, as upstream.
+	in := "\n\n{\"a\":1}"
+	got, _ := applyEditsForTest(in, Format(in, &Range{Offset: 0, Length: len(in)}, o))
+	if want := `{ "a": 1 }`; got != want {
+		t.Errorf("range: got %q, want %q", got, want)
+	}
+}
+
+func TestFormatInsertFinalNewline(t *testing.T) {
+	o := spaces2()
+	o.InsertFinalNewline = true
+	assertFormat(t, `{"a":1}`, "{\n  \"a\": 1\n}\n", o)
+	assertFormat(t, "{\"a\":1}\n", "{\n  \"a\": 1\n}\n", o)
+	// Trailing whitespace collapses to exactly one EOL.
+	assertFormat(t, "{\"a\":1}  \n\n", "{\n  \"a\": 1\n}\n", o)
+	assertFormat(t, "// c", "// c\n", o)
+	// A document with no tokens is left alone.
+	assertFormat(t, "", "", o)
+	assertFormat(t, "   ", "   ", o)
+	// The EOL is the document's own.
+	assertFormat(t, "{\"a\":1}\r\n", "{\r\n  \"a\": 1\r\n}\r\n", o)
+	// Without it, trailing whitespace is removed, final newline included.
 	assertFormat(t, "{\"a\":1}\n", "{\n  \"a\": 1\n}", spaces2())
 }
 
@@ -833,13 +919,16 @@ var formatCorpus = []string{
 // preservation.
 func TestFormatProperties(t *testing.T) {
 	optionSets := map[string]FormatOptions{
-		"spaces2":  spaces2(),
-		"tabs4":    tabs4(),
-		"detect":   detect2(),
-		"zero":     {},
-		"spaces8":  {TabSize: 8, InsertSpaces: true, EOL: "\n"},
-		"crlfOpt":  {TabSize: 2, InsertSpaces: true, EOL: "\r\n"},
-		"defaults": DefaultFormatOptions(),
+		"spaces2":   spaces2(),
+		"tabs4":     tabs4(),
+		"detect":    detect2(),
+		"zero":      {},
+		"spaces8":   {TabSize: 8, InsertSpaces: true, EOL: "\n"},
+		"crlfOpt":   {TabSize: 2, InsertSpaces: true, EOL: "\r\n"},
+		"defaults":  DefaultFormatOptions(),
+		"keepLines": keepLines2(),
+		"keepFinal": {TabSize: 4, InsertSpaces: false, EOL: "\r\n", KeepLines: true, InsertFinalNewline: true},
+		"finalNL":   {TabSize: 2, InsertSpaces: true, EOL: "\n", InsertFinalNewline: true},
 	}
 	for name, o := range optionSets {
 		for _, in := range formatCorpus {
@@ -887,13 +976,52 @@ type goldenCase struct {
 // goldenOptions and goldenRanges must stay in step with the tables in
 // testdata/gen_format_golden.js; the names are what the golden file records.
 var goldenOptions = map[string]FormatOptions{
-	"spaces2":  {TabSize: 2, InsertSpaces: true, EOL: "\n"},
-	"tabs4":    {TabSize: 4, InsertSpaces: false, EOL: "\n"},
-	"detect":   {TabSize: 2, InsertSpaces: true, EOL: ""},
-	"zero":     {TabSize: 0, InsertSpaces: false, EOL: ""},
-	"spaces8":  {TabSize: 8, InsertSpaces: true, EOL: "\n"},
-	"crlfOpt":  {TabSize: 2, InsertSpaces: true, EOL: "\r\n"},
-	"defaults": {TabSize: 4, InsertSpaces: true, EOL: "\n"},
+	"spaces2":   {TabSize: 2, InsertSpaces: true, EOL: "\n"},
+	"tabs4":     {TabSize: 4, InsertSpaces: false, EOL: "\n"},
+	"detect":    {TabSize: 2, InsertSpaces: true, EOL: ""},
+	"zero":      {TabSize: 0, InsertSpaces: false, EOL: ""},
+	"spaces8":   {TabSize: 8, InsertSpaces: true, EOL: "\n"},
+	"crlfOpt":   {TabSize: 2, InsertSpaces: true, EOL: "\r\n"},
+	"defaults":  {TabSize: 4, InsertSpaces: true, EOL: "\n"},
+	"keepLines": {TabSize: 2, InsertSpaces: true, EOL: "\n", KeepLines: true},
+	"keepTabs":  {TabSize: 4, InsertSpaces: false, EOL: "", KeepLines: true},
+	"finalNL":   {TabSize: 2, InsertSpaces: true, EOL: "\n", InsertFinalNewline: true},
+	"keepFinal": {TabSize: 2, InsertSpaces: true, EOL: "\r\n", KeepLines: true, InsertFinalNewline: true},
+}
+
+// adjustForLeadingBreaks rewrites upstream's recorded answer for the one place
+// we deliberately differ: the leading line breaks under KeepLines, where
+// upstream emits an insertion at offset 0 plus a deletion of the gap, and for
+// a document with no tokens only the insertion. We emit one minimal edit over
+// the gap, and nothing for a document with no tokens. See formatter.run.
+//
+// Everything else in the case is compared exactly as recorded.
+func adjustForLeadingBreaks(t *testing.T, c *goldenCase, o FormatOptions) {
+	t.Helper()
+	lead := c.Text[:len(c.Text)-len(strings.TrimLeft(c.Text, " \t\r\n\v\f"))]
+	if !o.KeepLines || c.Range != "nil" || !strings.ContainsAny(lead, "\r\n") {
+		return
+	}
+	if !isASCII(c.Text) {
+		t.Fatalf("golden case %q: a KeepLines document starting with a line break needs its edit list to be adjusted, which is only recorded for ASCII", c.Text)
+	}
+	e := c.Edits
+	if len(e) == 0 || e[0].Offset != 0 || e[0].Length != 0 {
+		t.Fatalf("golden case %q: expected upstream's leading insertion, got %+v", c.Text, e)
+	}
+	if len(e) > 1 && e[1].Offset == 0 && e[1].Content == "" {
+		merged := Edit{Offset: 0, Length: e[1].Length, Content: e[0].Content}
+		rest := e[2:]
+		if c.Text[:merged.Length] == merged.Content {
+			c.Edits = append([]Edit{}, rest...)
+		} else {
+			c.Edits = append([]Edit{merged}, rest...)
+		}
+	} else {
+		// No deletion follows: the document has no tokens.
+		c.Edits = e[1:]
+	}
+	c.Applied, _ = applyEditsForTest(c.Text, c.Edits)
 }
 
 var goldenRanges = map[string]*Range{
@@ -964,6 +1092,7 @@ func TestFormatGoldenCorpus(t *testing.T) {
 			t.Fatalf("line %d: unknown range shape %q -- keep this table in step with the generator", line, c.Range)
 		}
 		n++
+		adjustForLeadingBreaks(t, &c, o)
 
 		var rr *Range
 		if r != nil {
