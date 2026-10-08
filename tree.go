@@ -102,10 +102,11 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 		errs    []ParseError
 	)
 
-	// attach adds child to current, closing a completed property if that
-	// leaves the property with both of its children.
+	// ensureProperty closes a property that has received BOTH its key and its
+	// value, extending it to cover the value. A property's parent is always an
+	// object, so one pop ends it.
 	ensureProperty := func() {
-		for current != nil && current.Type == NodeProperty && len(current.Children) == 2 {
+		if current != nil && current.Type == NodeProperty && len(current.Children) == 2 {
 			current.Length = current.Children[1].Offset + current.Children[1].Length - current.Offset
 			current = current.Parent
 		}
@@ -120,6 +121,7 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 		}
 	}
 
+	// attach adds n as the last child of current, or makes it the root.
 	attach := func(n *Node) *Node {
 		if current == nil {
 			root = n
@@ -132,10 +134,6 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 
 	newNode := func(t NodeType, s Span) *Node {
 		return &Node{Type: t, Offset: s.Offset, Length: s.Length, ColonOffset: -1}
-	}
-
-	onValueDone := func() {
-		ensureProperty()
 	}
 
 	Visit(text, Visitor{
@@ -163,7 +161,7 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 			// unterminated object); Length covers it.
 			current.Length = s.Offset + s.Length - current.Offset
 			current = current.Parent
-			onValueDone()
+			ensureProperty()
 		},
 		OnArrayBegin: func(s Span) {
 			current = attach(newNode(NodeArray, s))
@@ -171,13 +169,13 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 		OnArrayEnd: func(s Span) {
 			current.Length = s.Offset + s.Length - current.Offset
 			current = current.Parent
-			onValueDone()
+			ensureProperty()
 		},
 		OnLiteralValue: func(v any, s Span) {
 			n := newNode(literalType(v), s)
 			n.Literal = v
 			attach(n)
-			onValueDone()
+			ensureProperty()
 		},
 		OnSeparator: func(sep string, s Span) {
 			if sep == ":" && current != nil && current.Type == NodeProperty {

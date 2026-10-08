@@ -127,6 +127,20 @@ func TestSetPositionResetsLineTracking(t *testing.T) {
 	}
 }
 
+func TestSetPositionNegative(t *testing.T) {
+	// A negative position clamps to 0 rather than panicking on the next Scan.
+	for _, pos := range []int{-5, -1} {
+		s := NewScanner("{}")
+		s.SetPosition(pos)
+		if col := s.StartColumn(); col < 0 {
+			t.Errorf("SetPosition(%d): StartColumn() = %d, want >= 0", pos, col)
+		}
+		if k := s.Scan(); k != OpenBrace || s.Offset() != 0 {
+			t.Errorf("SetPosition(%d): %v at %d, want OpenBrace at 0", pos, k, s.Offset())
+		}
+	}
+}
+
 func assertValue(t *testing.T, text string, wantKind SyntaxKind, wantValue string, wantErr ScanError) {
 	t.Helper()
 	s := NewScanner(text)

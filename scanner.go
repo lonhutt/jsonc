@@ -152,6 +152,7 @@ func (s *Scanner) StartColumn() int { return s.tokenOffset - s.tokenLineStartOff
 // that: a column is a byte count from the start of a line and can never be
 // negative.
 func (s *Scanner) SetPosition(pos int) {
+	pos = max(pos, 0)
 	s.pos = pos
 	s.value = ""
 	s.tokenOffset = pos
