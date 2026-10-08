@@ -48,8 +48,9 @@ node := jsonc.FindNodeAtLocation(root, jsonc.Path{"a", 1})
 fmt.Println(node.Literal, node.Offset) // 2 10
 ```
 
-`Visit` is the callback API both of these are built on, and `NewScanner` gets
-you the tokens.
+`Visit` is the callback API both of these are built on; a `Begin` callback
+that returns false skips that container, as upstream. `NewScanner` gets you
+the tokens.
 
 ## Editing
 
@@ -113,6 +114,8 @@ weren't worth copying.
 - **A node's scalar value is `Node.Literal`**, and `Node.Value()` builds the
   whole subtree (upstream's `getNodeValue`).
 - **`Parse` doesn't keep key order**, since a `map` can't. `ParseTree` does.
+- **A lone surrogate**, like `"\ud83d"`, comes back as U+FFFD with an
+  `InvalidUnicode` error; a Go string can't hold one.
 - **Numbers are `float64`** by default, like JavaScript; `UseNumber()` keeps
   them exact as `json.Number`.
 - **A number out of range is an error**, not `Infinity`: `1e400` parses to `0`
@@ -139,7 +142,7 @@ weren't worth copying.
   outside the array; those are an error here.
 - **`Format` doesn't merge tokens.** Upstream joins an unterminated string with
   whatever's on the next line (`{"a\n:1}` becomes `{"a: 1}`), and formats a
-  range that starts inside a multi-line comment as if the comment's tail were
+  range that starts inside a multi-line comment or string as if its tail were
   code.
 
 `Remove` matches upstream in one way that might surprise you: comments inside

@@ -114,11 +114,13 @@ type Span struct {
 	Path func() Path
 }
 
-// Visitor holds Visit's callbacks; all optional.
+// Visitor holds Visit's callbacks; all optional. A Begin callback that
+// returns false skips the container's contents: no callbacks, errors
+// included, until its End.
 type Visitor struct {
-	OnObjectBegin    func(Span)
+	OnObjectBegin    func(Span) bool
 	OnObjectEnd      func(Span)
-	OnArrayBegin     func(Span)
+	OnArrayBegin     func(Span) bool
 	OnArrayEnd       func(Span)
 	OnObjectProperty func(name string, s Span)
 	OnLiteralValue   func(v any, s Span)
@@ -133,6 +135,30 @@ type visitState struct {
 	cfg parseConfig
 	// path is live; keys and indices are overwritten in place as parsing moves.
 	path Path
+	// skipped counts the open containers inside one a Begin callback skipped.
+	skipped int
+}
+
+// begin fires a Begin callback. Depth is counted whether or not one is set;
+// upstream only counts it when one is, so a nested container without one ends
+// the skip early.
+func (st *visitState) begin(cb func(Span) bool) {
+	switch {
+	case st.skipped > 0:
+		st.skipped++
+	case cb != nil && !cb(st.span()):
+		st.skipped = 1
+	}
+}
+
+// end fires an End callback; a skipped container's own End still fires.
+func (st *visitState) end(cb func(Span)) {
+	if st.skipped > 0 {
+		st.skipped--
+	}
+	if st.skipped == 0 && cb != nil {
+		cb(st.span())
+	}
 }
 
 // Visit parses text, calling v's callbacks as it goes. Errors go to v.OnError
@@ -200,7 +226,7 @@ func (st *visitState) scanNext() SyntaxKind {
 		case LineComment, BlockComment:
 			if st.cfg.disallowComments {
 				st.handleError(InvalidCommentToken, nil, nil)
-			} else if st.v.OnComment != nil {
+			} else if st.v.OnComment != nil && st.skipped == 0 {
 				st.v.OnComment(st.span())
 			}
 		case Unknown:
@@ -218,7 +244,7 @@ func (st *visitState) scanNext() SyntaxKind {
 // skipUntilAfter is only for parity with upstream; both callers are already at
 // EOF, so it never consumes anything.
 func (st *visitState) handleError(code ParseErrorCode, skipUntilAfter, skipUntil []SyntaxKind) {
-	if st.v.OnError != nil {
+	if st.v.OnError != nil && st.skipped == 0 {
 		st.v.OnError(code, st.span())
 	}
 	if len(skipUntilAfter) == 0 && len(skipUntil) == 0 {
@@ -277,23 +303,23 @@ func (st *visitState) parseLiteral() bool {
 			}
 			value = f
 		}
-		if st.v.OnLiteralValue != nil {
+		if st.v.OnLiteralValue != nil && st.skipped == 0 {
 			st.v.OnLiteralValue(value, st.span())
 		}
 	case StringLiteral:
-		if st.v.OnLiteralValue != nil {
+		if st.v.OnLiteralValue != nil && st.skipped == 0 {
 			st.v.OnLiteralValue(st.s.Value(), st.span())
 		}
 	case NullKeyword:
-		if st.v.OnLiteralValue != nil {
+		if st.v.OnLiteralValue != nil && st.skipped == 0 {
 			st.v.OnLiteralValue(nil, st.span())
 		}
 	case TrueKeyword:
-		if st.v.OnLiteralValue != nil {
+		if st.v.OnLiteralValue != nil && st.skipped == 0 {
 			st.v.OnLiteralValue(true, st.span())
 		}
 	case FalseKeyword:
-		if st.v.OnLiteralValue != nil {
+		if st.v.OnLiteralValue != nil && st.skipped == 0 {
 			st.v.OnLiteralValue(false, st.span())
 		}
 	default:
@@ -304,7 +330,7 @@ func (st *visitState) parseLiteral() bool {
 }
 
 func (st *visitState) separator(sep string) {
-	if st.v.OnSeparator != nil {
+	if st.v.OnSeparator != nil && st.skipped == 0 {
 		st.v.OnSeparator(sep, st.span())
 	}
 }
@@ -315,31 +341,28 @@ func (st *visitState) parseProperty() bool {
 		return false
 	}
 	name := st.s.Value()
-	// before the value, so its events see this key
-	st.path[len(st.path)-1] = name
-	if st.v.OnObjectProperty != nil {
+	if st.v.OnObjectProperty != nil && st.skipped == 0 {
 		st.v.OnObjectProperty(name, st.span())
 	}
+	// after the property event, which gets the object's path, as upstream
+	st.path = append(st.path, name)
 	st.scanNext()
 
-	if st.s.Token() != Colon {
+	if st.s.Token() == Colon {
+		st.separator(":")
+		st.scanNext()
+		if !st.parseValue() {
+			st.handleError(ValueExpected, nil, []SyntaxKind{CloseBrace, Comma})
+		}
+	} else {
 		st.handleError(ColonExpected, nil, []SyntaxKind{CloseBrace, Comma})
-		return true
 	}
-	st.separator(":")
-	st.scanNext()
-	if !st.parseValue() {
-		st.handleError(ValueExpected, nil, []SyntaxKind{CloseBrace, Comma})
-	}
+	st.path = st.path[:len(st.path)-1]
 	return true
 }
 
 func (st *visitState) parseObject() bool {
-	if st.v.OnObjectBegin != nil {
-		st.v.OnObjectBegin(st.span())
-	}
-	// placeholder; parseProperty fills in each key
-	st.path = append(st.path, nil)
+	st.begin(st.v.OnObjectBegin)
 	st.scanNext()
 
 	needsComma := false
@@ -362,10 +385,7 @@ func (st *visitState) parseObject() bool {
 		needsComma = true
 	}
 
-	st.path = st.path[:len(st.path)-1]
-	if st.v.OnObjectEnd != nil {
-		st.v.OnObjectEnd(st.span())
-	}
+	st.end(st.v.OnObjectEnd)
 	if st.s.Token() != CloseBrace {
 		st.handleError(CloseBraceExpected, []SyntaxKind{CloseBrace}, nil)
 	} else {
@@ -375,12 +395,11 @@ func (st *visitState) parseObject() bool {
 }
 
 func (st *visitState) parseArray() bool {
-	if st.v.OnArrayBegin != nil {
-		st.v.OnArrayBegin(st.span())
-	}
-	st.path = append(st.path, 0)
+	st.begin(st.v.OnArrayBegin)
 	st.scanNext()
 
+	// the index goes on the path at the first element, as upstream
+	index := -1
 	needsComma := false
 	for st.s.Token() != CloseBracket && st.s.Token() != EOF {
 		if st.s.Token() == Comma {
@@ -395,19 +414,21 @@ func (st *visitState) parseArray() bool {
 		} else if needsComma {
 			st.handleError(CommaExpected, nil, nil)
 		}
+		if index++; index == 0 {
+			st.path = append(st.path, 0)
+		} else {
+			st.path[len(st.path)-1] = index
+		}
 		if !st.parseValue() {
 			st.handleError(ValueExpected, nil, []SyntaxKind{CloseBracket, Comma})
-		}
-		if i, ok := st.path[len(st.path)-1].(int); ok {
-			st.path[len(st.path)-1] = i + 1
 		}
 		needsComma = true
 	}
 
-	st.path = st.path[:len(st.path)-1]
-	if st.v.OnArrayEnd != nil {
-		st.v.OnArrayEnd(st.span())
+	if index >= 0 {
+		st.path = st.path[:len(st.path)-1]
 	}
+	st.end(st.v.OnArrayEnd)
 	if st.s.Token() != CloseBracket {
 		st.handleError(CloseBracketExpected, []SyntaxKind{CloseBracket}, nil)
 	} else {
@@ -462,9 +483,10 @@ func Parse(text string, opts ...ParseOption) (any, []ParseError) {
 	}
 
 	Visit(text, Visitor{
-		OnObjectBegin: func(Span) {
+		OnObjectBegin: func(Span) bool {
 			push(map[string]any{})
 			keys = append(keys, "")
+			return true
 		},
 		OnObjectProperty: func(name string, _ Span) {
 			keys[len(keys)-1] = name
@@ -473,9 +495,10 @@ func Parse(text string, opts ...ParseOption) (any, []ParseError) {
 			keys = keys[:len(keys)-1]
 			pop()
 		},
-		OnArrayBegin: func(Span) {
+		OnArrayBegin: func(Span) bool {
 			arr := make([]any, 0)
 			push(&arr)
+			return true
 		},
 		OnArrayEnd: func(Span) {
 			pop()

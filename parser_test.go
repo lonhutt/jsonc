@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -22,9 +23,9 @@ func collectErrors(t *testing.T, text string, opts ...ParseOption) []ParseErrorC
 func events(text string, opts ...ParseOption) []string {
 	var out []string
 	Visit(text, Visitor{
-		OnObjectBegin:    func(Span) { out = append(out, "{") },
+		OnObjectBegin:    func(Span) bool { out = append(out, "{"); return true },
 		OnObjectEnd:      func(Span) { out = append(out, "}") },
-		OnArrayBegin:     func(Span) { out = append(out, "[") },
+		OnArrayBegin:     func(Span) bool { out = append(out, "["); return true },
 		OnArrayEnd:       func(Span) { out = append(out, "]") },
 		OnObjectProperty: func(n string, _ Span) { out = append(out, "key:"+n) },
 		OnLiteralValue:   func(v any, _ Span) { out = append(out, fmt.Sprintf("val:%v", v)) },
@@ -196,22 +197,20 @@ func TestVisitNumberRange(t *testing.T) {
 	if v, _ := probe(`12345678901234567890`, UseNumber()); v != json.Number("12345678901234567890") {
 		t.Errorf("large int UseNumber = %#v, want digits preserved", v)
 	}
-	// A real syntax error still reports under UseNumber; the scanner flags "1e"
-	// as UnexpectedEndOfNumber, then parseLiteral adds InvalidNumberFormat.
+	// a syntax error still reports under UseNumber
 	if _, codes := probe(`1e`, UseNumber()); len(codes) == 0 {
 		t.Error("1e under UseNumber reported no error; a syntax error must still be reported")
 	}
 }
 
-// Pins the exact codes for "1e" under UseNumber.
+// "1e" scans as 1 with the bad exponent left out, so it's one error and the
+// value 1, as upstream; not 0 with InvalidNumberFormat too.
 func TestVisitNumberSyntaxErrorCodes(t *testing.T) {
-	var codes []ParseErrorCode
-	Visit(`1e`, Visitor{
-		OnError: func(c ParseErrorCode, _ Span) { codes = append(codes, c) },
-	}, UseNumber())
-	want := []ParseErrorCode{UnexpectedEndOfNumber, InvalidNumberFormat}
-	if !reflect.DeepEqual(codes, want) {
-		t.Errorf("1e under UseNumber = %v, want %v", codes, want)
+	for _, opts := range [][]ParseOption{nil, {UseNumber()}} {
+		v, errs := Parse(`1e`, opts...)
+		if len(errs) != 1 || errs[0].Code != UnexpectedEndOfNumber || (v != float64(1) && v != json.Number("1")) {
+			t.Errorf("Parse(1e, %d opts) = %#v, %v", len(opts), v, errs)
+		}
 	}
 }
 
@@ -350,4 +349,399 @@ func TestParseIsFaultTolerant(t *testing.T) {
 func TestParseNeverReturnsGoError(t *testing.T) {
 	// compile-time check: the second result is []ParseError, not error
 	var _ func(string, ...ParseOption) (any, []ParseError) = Parse
+}
+
+func assertValidParse(t *testing.T, in string, want any, opts ...ParseOption) {
+	t.Helper()
+	got, errs := Parse(in, opts...)
+	if len(errs) != 0 || !reflect.DeepEqual(got, want) {
+		t.Errorf("Parse(%q) = %#v, %v; want %#v and no errors", in, got, errs, want)
+	}
+}
+
+func assertInvalidParse(t *testing.T, in string, want any, opts ...ParseOption) {
+	t.Helper()
+	got, errs := Parse(in, opts...)
+	if len(errs) == 0 || !reflect.DeepEqual(got, want) {
+		t.Errorf("Parse(%q) = %#v, %v; want %#v and errors", in, got, errs, want)
+	}
+}
+
+type obj = map[string]any
+type arr = []any
+
+// Port of upstream's "parse: literals".
+func TestUpstreamParseLiterals(t *testing.T) {
+	assertValidParse(t, "true", true)
+	assertValidParse(t, "false", false)
+	assertValidParse(t, "null", nil)
+	assertValidParse(t, `"foo"`, "foo")
+	assertValidParse(t, `"\"-\\-\/-\b-\f-\n-\r-\t"`, "\"-\\-/-\b-\f-\n-\r-\t")
+	assertValidParse(t, `"Ü"`, "Ü")
+	assertValidParse(t, "9", 9.0)
+	assertValidParse(t, "-9", -9.0)
+	assertValidParse(t, "0.129", 0.129)
+	assertValidParse(t, "23e3", 23e3)
+	assertValidParse(t, "1.2E+3", 1.2e+3)
+	assertValidParse(t, "1.2E-3", 1.2e-3)
+	assertValidParse(t, "1.2E-3 // comment", 1.2e-3)
+}
+
+// Port of upstream's "parse: objects".
+func TestUpstreamParseObjects(t *testing.T) {
+	assertValidParse(t, "{}", obj{})
+	assertValidParse(t, `{ "foo": true }`, obj{"foo": true})
+	assertValidParse(t, `{ "bar": 8, "xoo": "foo" }`, obj{"bar": 8.0, "xoo": "foo"})
+	assertValidParse(t, `{ "hello": [], "world": {} }`, obj{"hello": arr{}, "world": obj{}})
+	assertValidParse(t, `{ "a": false, "b": true, "c": [ 7.4 ] }`, obj{"a": false, "b": true, "c": arr{7.4}})
+	assertValidParse(t, `{ "lineComment": "//", "blockComment": ["/*", "*/"], "brackets": [ ["{", "}"], ["[", "]"], ["(", ")"] ] }`,
+		obj{"lineComment": "//", "blockComment": arr{"/*", "*/"}, "brackets": arr{arr{"{", "}"}, arr{"[", "]"}, arr{"(", ")"}}})
+	assertValidParse(t, `{ "hello": { "again": { "inside": 5 }, "world": 1 }}`, obj{"hello": obj{"again": obj{"inside": 5.0}, "world": 1.0}})
+	assertValidParse(t, `{ "foo": /*hello*/true }`, obj{"foo": true})
+	assertValidParse(t, `{ "": true }`, obj{"": true})
+}
+
+// Port of upstream's "parse: arrays".
+func TestUpstreamParseArrays(t *testing.T) {
+	assertValidParse(t, "[]", arr{})
+	assertValidParse(t, "[ [],  [ [] ]]", arr{arr{}, arr{arr{}}})
+	assertValidParse(t, "[ 1, 2, 3 ]", arr{1.0, 2.0, 3.0})
+	assertValidParse(t, `[ { "a": null } ]`, arr{obj{"a": nil}})
+}
+
+// Ports of upstream's "parse: objects with errors", "parse: array with
+// errors" and "parse: errors".
+func TestUpstreamParseErrors(t *testing.T) {
+	assertInvalidParse(t, "{,}", obj{})
+	assertInvalidParse(t, `{ "foo": true, }`, obj{"foo": true})
+	assertInvalidParse(t, `{ "bar": 8 "xoo": "foo" }`, obj{"bar": 8.0, "xoo": "foo"})
+	assertInvalidParse(t, `{ ,"bar": 8 }`, obj{"bar": 8.0})
+	assertInvalidParse(t, `{ ,"bar": 8, "foo" }`, obj{"bar": 8.0})
+	assertInvalidParse(t, `{ "bar": 8, "foo": }`, obj{"bar": 8.0})
+	assertInvalidParse(t, `{ 8, "foo": 9 }`, obj{"foo": 9.0})
+
+	assertInvalidParse(t, "[,]", arr{})
+	assertInvalidParse(t, "[ 1 2, 3 ]", arr{1.0, 2.0, 3.0})
+	assertInvalidParse(t, "[ ,1, 2, 3 ]", arr{1.0, 2.0, 3.0})
+	assertInvalidParse(t, "[ ,1, 2, 3, ]", arr{1.0, 2.0, 3.0})
+
+	assertInvalidParse(t, "", nil)
+	assertInvalidParse(t, "1,1", 1.0)
+}
+
+// Port of upstream's "parse: disallow comments".
+func TestUpstreamParseDisallowComments(t *testing.T) {
+	assertValidParse(t, `[ 1, 2, null, "foo" ]`, arr{1.0, 2.0, nil, "foo"}, DisallowComments())
+	assertValidParse(t, `{ "hello": [], "world": {} }`, obj{"hello": arr{}, "world": obj{}}, DisallowComments())
+	assertInvalidParse(t, `{ "foo": /*comment*/ true }`, obj{"foo": true}, DisallowComments())
+}
+
+// Port of upstream's "parse: trailing comma".
+func TestUpstreamParseTrailingComma(t *testing.T) {
+	assertValidParse(t, `{ "hello": [], }`, obj{"hello": arr{}}, AllowTrailingComma())
+	assertValidParse(t, `{ "hello": [] }`, obj{"hello": arr{}}, AllowTrailingComma())
+	assertValidParse(t, `{ "hello": [], "world": {}, }`, obj{"hello": arr{}, "world": obj{}}, AllowTrailingComma())
+	assertValidParse(t, `{ "hello": [], "world": {} }`, obj{"hello": arr{}, "world": obj{}}, AllowTrailingComma())
+	assertValidParse(t, "[ 1, 2, ]", arr{1.0, 2.0}, AllowTrailingComma())
+	assertValidParse(t, "[ 1, 2 ]", arr{1.0, 2.0}, AllowTrailingComma())
+
+	assertInvalidParse(t, `{ "hello": [], }`, obj{"hello": arr{}})
+	assertInvalidParse(t, `{ "hello": [], "world": {}, }`, obj{"hello": arr{}, "world": obj{}})
+	assertInvalidParse(t, "[ 1, 2, ]", arr{1.0, 2.0})
+}
+
+// ev is one visitor callback as upstream's assertVisit records it. Path is
+// only recorded where upstream passes a path supplier.
+type ev struct {
+	ID         string
+	Text       string
+	Line, Char int
+	Arg        any
+	Path       Path
+}
+
+// ve is one visitor error as upstream's assertVisit records it.
+type ve struct {
+	Code           ParseErrorCode
+	Offset, Length int
+	Line, Char     int
+}
+
+// assertVisit is upstream's assertVisit.
+func assertVisit(t *testing.T, in string, want []ev, wantErrs []ve, opts ...ParseOption) {
+	t.Helper()
+	assertVisitStopping(t, in, nil, want, wantErrs, opts...)
+}
+
+// assertVisitStopping is upstream's assertVisit with stopOffsets: a Begin at
+// one of those offsets returns false.
+func assertVisitStopping(t *testing.T, in string, stops []int, want []ev, wantErrs []ve, opts ...ParseOption) {
+	t.Helper()
+	var got []ev
+	var gotErrs []ve
+	record := func(id string, s Span, arg any, withPath bool) {
+		e := ev{ID: id, Text: in[s.Offset : s.Offset+s.Length], Line: s.StartLine, Char: s.StartCol, Arg: arg}
+		if withPath {
+			e.Path = s.Path()
+		}
+		got = append(got, e)
+	}
+	Visit(in, Visitor{
+		OnObjectBegin: func(s Span) bool {
+			record("onObjectBegin", s, nil, true)
+			return !slices.Contains(stops, s.Offset)
+		},
+		OnObjectProperty: func(name string, s Span) { record("onObjectProperty", s, name, true) },
+		OnObjectEnd:      func(s Span) { record("onObjectEnd", s, nil, false) },
+		OnArrayBegin: func(s Span) bool {
+			record("onArrayBegin", s, nil, true)
+			return !slices.Contains(stops, s.Offset)
+		},
+		OnArrayEnd:     func(s Span) { record("onArrayEnd", s, nil, false) },
+		OnLiteralValue: func(v any, s Span) { record("onLiteralValue", s, v, true) },
+		OnSeparator:    func(sep string, s Span) { record("onSeparator", s, sep, false) },
+		OnComment:      func(s Span) { record("onComment", s, nil, false) },
+		OnError: func(c ParseErrorCode, s Span) {
+			gotErrs = append(gotErrs, ve{c, s.Offset, s.Length, s.StartLine, s.StartCol})
+		},
+	}, opts...)
+	if !reflect.DeepEqual(gotErrs, wantErrs) {
+		t.Errorf("Visit(%q) errors:\n got %v\nwant %v", in, gotErrs, wantErrs)
+	}
+	if len(got) != len(want) {
+		t.Errorf("Visit(%q): %d events, want %d:\n got %v\nwant %v", in, len(got), len(want), got, want)
+		return
+	}
+	for i := range want {
+		if !reflect.DeepEqual(got[i], want[i]) {
+			t.Errorf("Visit(%q) event %d:\n got %+v\nwant %+v", in, i, got[i], want[i])
+		}
+	}
+}
+
+// Port of upstream's "visit: object".
+func TestUpstreamVisitObject(t *testing.T) {
+	assertVisit(t, "{ }", []ev{
+		{"onObjectBegin", "{", 0, 0, nil, Path{}},
+		{"onObjectEnd", "}", 0, 2, nil, nil},
+	}, nil)
+	assertVisit(t, `{ "foo": "bar" }`, []ev{
+		{"onObjectBegin", "{", 0, 0, nil, Path{}},
+		{"onObjectProperty", `"foo"`, 0, 2, "foo", Path{}},
+		{"onSeparator", ":", 0, 7, ":", nil},
+		{"onLiteralValue", `"bar"`, 0, 9, "bar", Path{"foo"}},
+		{"onObjectEnd", "}", 0, 15, nil, nil},
+	}, nil)
+	assertVisit(t, `{ "foo": { "goo": 3 } }`, []ev{
+		{"onObjectBegin", "{", 0, 0, nil, Path{}},
+		{"onObjectProperty", `"foo"`, 0, 2, "foo", Path{}},
+		{"onSeparator", ":", 0, 7, ":", nil},
+		{"onObjectBegin", "{", 0, 9, nil, Path{"foo"}},
+		{"onObjectProperty", `"goo"`, 0, 11, "goo", Path{"foo"}},
+		{"onSeparator", ":", 0, 16, ":", nil},
+		{"onLiteralValue", "3", 0, 18, 3.0, Path{"foo", "goo"}},
+		{"onObjectEnd", "}", 0, 20, nil, nil},
+		{"onObjectEnd", "}", 0, 22, nil, nil},
+	}, nil)
+	assertVisitStopping(t, `{ "foo": "bar", "a": {"b": "c"} }`, []int{0}, []ev{
+		{"onObjectBegin", "{", 0, 0, nil, Path{}},
+		{"onObjectEnd", "}", 0, 32, nil, nil},
+	}, nil)
+	assertVisitStopping(t, `{ "a": { "b": "c", "d": { "e": "f" } } }`, []int{7}, []ev{
+		{"onObjectBegin", "{", 0, 0, nil, Path{}},
+		{"onObjectProperty", `"a"`, 0, 2, "a", Path{}},
+		{"onSeparator", ":", 0, 5, ":", nil},
+		{"onObjectBegin", "{", 0, 7, nil, Path{"a"}},
+		{"onObjectEnd", "}", 0, 37, nil, nil},
+		{"onObjectEnd", "}", 0, 39, nil, nil},
+	}, nil, DisallowComments())
+}
+
+// Port of upstream's "visit: array".
+func TestUpstreamVisitArray(t *testing.T) {
+	assertVisit(t, "[]", []ev{
+		{"onArrayBegin", "[", 0, 0, nil, Path{}},
+		{"onArrayEnd", "]", 0, 1, nil, nil},
+	}, nil)
+	assertVisit(t, "[ true, null, [] ]", []ev{
+		{"onArrayBegin", "[", 0, 0, nil, Path{}},
+		{"onLiteralValue", "true", 0, 2, true, Path{0}},
+		{"onSeparator", ",", 0, 6, ",", nil},
+		{"onLiteralValue", "null", 0, 8, nil, Path{1}},
+		{"onSeparator", ",", 0, 12, ",", nil},
+		{"onArrayBegin", "[", 0, 14, nil, Path{2}},
+		{"onArrayEnd", "]", 0, 15, nil, nil},
+		{"onArrayEnd", "]", 0, 17, nil, nil},
+	}, nil)
+	assertVisit(t, "[\r\n0,\r\n1,\r\n2\r\n]", []ev{
+		{"onArrayBegin", "[", 0, 0, nil, Path{}},
+		{"onLiteralValue", "0", 1, 0, 0.0, Path{0}},
+		{"onSeparator", ",", 1, 1, ",", nil},
+		{"onLiteralValue", "1", 2, 0, 1.0, Path{1}},
+		{"onSeparator", ",", 2, 1, ",", nil},
+		{"onLiteralValue", "2", 3, 0, 2.0, Path{2}},
+		{"onArrayEnd", "]", 4, 0, nil, nil},
+	}, nil)
+}
+
+// Port of upstream's "visit: object & array".
+func TestUpstreamVisitObjectAndArray(t *testing.T) {
+	assertVisit(t, `[ { "p1": [ { "p11": 1, "p12": [ true, [ false, 2 ] ] } ] } ]`, []ev{
+		{"onArrayBegin", "[", 0, 0, nil, Path{}},
+		{"onObjectBegin", "{", 0, 2, nil, Path{0}},
+		{"onObjectProperty", `"p1"`, 0, 4, "p1", Path{0}},
+		{"onSeparator", ":", 0, 8, ":", nil},
+		{"onArrayBegin", "[", 0, 10, nil, Path{0, "p1"}},
+		{"onObjectBegin", "{", 0, 12, nil, Path{0, "p1", 0}},
+		{"onObjectProperty", `"p11"`, 0, 14, "p11", Path{0, "p1", 0}},
+		{"onSeparator", ":", 0, 19, ":", nil},
+		{"onLiteralValue", "1", 0, 21, 1.0, Path{0, "p1", 0, "p11"}},
+		{"onSeparator", ",", 0, 22, ",", nil},
+		{"onObjectProperty", `"p12"`, 0, 24, "p12", Path{0, "p1", 0}},
+		{"onSeparator", ":", 0, 29, ":", nil},
+		{"onArrayBegin", "[", 0, 31, nil, Path{0, "p1", 0, "p12"}},
+		{"onLiteralValue", "true", 0, 33, true, Path{0, "p1", 0, "p12", 0}},
+		{"onSeparator", ",", 0, 37, ",", nil},
+		{"onArrayBegin", "[", 0, 39, nil, Path{0, "p1", 0, "p12", 1}},
+		{"onLiteralValue", "false", 0, 41, false, Path{0, "p1", 0, "p12", 1, 0}},
+		{"onSeparator", ",", 0, 46, ",", nil},
+		{"onLiteralValue", "2", 0, 48, 2.0, Path{0, "p1", 0, "p12", 1, 1}},
+		{"onArrayEnd", "]", 0, 50, nil, nil},
+		{"onArrayEnd", "]", 0, 52, nil, nil},
+		{"onObjectEnd", "}", 0, 54, nil, nil},
+		{"onArrayEnd", "]", 0, 56, nil, nil},
+		{"onObjectEnd", "}", 0, 58, nil, nil},
+		{"onArrayEnd", "]", 0, 60, nil, nil},
+	}, nil)
+	assertVisitStopping(t, `{ "foo": [ { "a": "b", "c:": "d", "d": { "e": "f" } } ] }`, []int{9}, []ev{
+		{"onObjectBegin", "{", 0, 0, nil, Path{}},
+		{"onObjectProperty", `"foo"`, 0, 2, "foo", Path{}},
+		{"onSeparator", ":", 0, 7, ":", nil},
+		{"onArrayBegin", "[", 0, 9, nil, Path{"foo"}},
+		{"onArrayEnd", "]", 0, 54, nil, nil},
+		{"onObjectEnd", "}", 0, 56, nil, nil},
+	}, nil, DisallowComments())
+}
+
+// Port of upstream's "visit: comment".
+func TestUpstreamVisitComment(t *testing.T) {
+	assertVisit(t, "/* g */ { \"foo\": //f\n\"bar\" }", []ev{
+		{"onComment", "/* g */", 0, 0, nil, nil},
+		{"onObjectBegin", "{", 0, 8, nil, Path{}},
+		{"onObjectProperty", `"foo"`, 0, 10, "foo", Path{}},
+		{"onSeparator", ":", 0, 15, ":", nil},
+		{"onComment", "//f", 0, 17, nil, nil},
+		{"onLiteralValue", `"bar"`, 1, 0, "bar", Path{"foo"}},
+		{"onObjectEnd", "}", 1, 6, nil, nil},
+	}, nil)
+	assertVisit(t, "/* g\r\n */ { \"foo\": //f\n\"bar\" }", []ev{
+		{"onComment", "/* g\r\n */", 0, 0, nil, nil},
+		{"onObjectBegin", "{", 1, 4, nil, Path{}},
+		{"onObjectProperty", `"foo"`, 1, 6, "foo", Path{}},
+		{"onSeparator", ":", 1, 11, ":", nil},
+		{"onComment", "//f", 1, 13, nil, nil},
+		{"onLiteralValue", `"bar"`, 2, 0, "bar", Path{"foo"}},
+		{"onObjectEnd", "}", 2, 6, nil, nil},
+	}, nil)
+	assertVisit(t, "/* g\n */ { \"foo\": //f\n\"bar\"\n}", []ev{
+		{"onObjectBegin", "{", 1, 4, nil, Path{}},
+		{"onObjectProperty", `"foo"`, 1, 6, "foo", Path{}},
+		{"onSeparator", ":", 1, 11, ":", nil},
+		{"onLiteralValue", `"bar"`, 2, 0, "bar", Path{"foo"}},
+		{"onObjectEnd", "}", 3, 0, nil, nil},
+	}, []ve{
+		{InvalidCommentToken, 0, 8, 0, 0},
+		{InvalidCommentToken, 18, 3, 1, 13},
+	}, DisallowComments())
+}
+
+// Port of upstream's "visit: malformed". Upstream notes these calls depend on
+// implementation details rather than dictating how malformed input parses.
+func TestUpstreamVisitMalformed(t *testing.T) {
+	assertVisit(t, `[ { "a", "b": [] 1, "c" [ 1 2 ], true: "d":, "e": }, 2, 3 4 ]`, []ev{
+		{"onArrayBegin", "[", 0, 0, nil, Path{}},
+		{"onObjectBegin", "{", 0, 2, nil, Path{0}},
+		{"onObjectProperty", `"a"`, 0, 4, "a", Path{0}},
+		{"onSeparator", ",", 0, 7, ",", nil},
+		{"onObjectProperty", `"b"`, 0, 9, "b", Path{0}},
+		{"onSeparator", ":", 0, 12, ":", nil},
+		{"onArrayBegin", "[", 0, 14, nil, Path{0, "b"}},
+		{"onArrayEnd", "]", 0, 15, nil, nil},
+		{"onSeparator", ",", 0, 18, ",", nil},
+		{"onObjectProperty", `"c"`, 0, 20, "c", Path{0}},
+		{"onSeparator", ",", 0, 31, ",", nil},
+		{"onSeparator", ",", 0, 43, ",", nil},
+		{"onObjectProperty", `"e"`, 0, 45, "e", Path{0}},
+		{"onSeparator", ":", 0, 48, ":", nil},
+		{"onObjectEnd", "}", 0, 50, nil, nil},
+		{"onSeparator", ",", 0, 51, ",", nil},
+		{"onLiteralValue", "2", 0, 53, 2.0, Path{1}},
+		{"onSeparator", ",", 0, 54, ",", nil},
+		{"onLiteralValue", "3", 0, 56, 3.0, Path{2}},
+		{"onLiteralValue", "4", 0, 58, 4.0, Path{3}},
+		{"onArrayEnd", "]", 0, 60, nil, nil},
+	}, []ve{
+		{ColonExpected, 7, 1, 0, 7},
+		{CommaExpected, 17, 1, 0, 17},
+		{PropertyNameExpected, 17, 1, 0, 17},
+		{ValueExpected, 18, 1, 0, 18},
+		{ColonExpected, 24, 1, 0, 24},
+		{PropertyNameExpected, 33, 4, 0, 33},
+		{ValueExpected, 43, 1, 0, 43},
+		{ValueExpected, 50, 1, 0, 50},
+		{CommaExpected, 58, 1, 0, 58},
+	})
+}
+
+// Port of the visit half of upstream's "visit: incomplete".
+func TestUpstreamVisitIncomplete(t *testing.T) {
+	assertVisit(t, `{"prop1":"foo","prop2":"foo2","prop3":{"prp1":{""}}}`, []ev{
+		{"onObjectBegin", "{", 0, 0, nil, Path{}},
+		{"onObjectProperty", `"prop1"`, 0, 1, "prop1", Path{}},
+		{"onSeparator", ":", 0, 8, ":", nil},
+		{"onLiteralValue", `"foo"`, 0, 9, "foo", Path{"prop1"}},
+		{"onSeparator", ",", 0, 14, ",", nil},
+		{"onObjectProperty", `"prop2"`, 0, 15, "prop2", Path{}},
+		{"onSeparator", ":", 0, 22, ":", nil},
+		{"onLiteralValue", `"foo2"`, 0, 23, "foo2", Path{"prop2"}},
+		{"onSeparator", ",", 0, 29, ",", nil},
+		{"onObjectProperty", `"prop3"`, 0, 30, "prop3", Path{}},
+		{"onSeparator", ":", 0, 37, ":", nil},
+		{"onObjectBegin", "{", 0, 38, nil, Path{"prop3"}},
+		{"onObjectProperty", `"prp1"`, 0, 39, "prp1", Path{"prop3"}},
+		{"onSeparator", ":", 0, 45, ":", nil},
+		{"onObjectBegin", "{", 0, 46, nil, Path{"prop3", "prp1"}},
+		{"onObjectProperty", `""`, 0, 47, "", Path{"prop3", "prp1"}},
+		{"onObjectEnd", "}", 0, 49, nil, nil},
+		{"onObjectEnd", "}", 0, 50, nil, nil},
+		{"onObjectEnd", "}", 0, 51, nil, nil},
+	}, []ve{{ColonExpected, 49, 1, 0, 49}})
+}
+
+// A skipped container's errors are skipped too, and its End still fires.
+func TestVisitSkipSuppressesErrors(t *testing.T) {
+	assertVisitStopping(t, "[ [1 2], 3 4 ]", []int{2}, []ev{
+		{"onArrayBegin", "[", 0, 0, nil, Path{}},
+		{"onArrayBegin", "[", 0, 2, nil, Path{0}},
+		{"onArrayEnd", "]", 0, 6, nil, nil},
+		{"onSeparator", ",", 0, 7, ",", nil},
+		{"onLiteralValue", "3", 0, 9, 3.0, Path{1}},
+		{"onLiteralValue", "4", 0, 11, 4.0, Path{2}},
+		{"onArrayEnd", "]", 0, 13, nil, nil},
+	}, []ve{{CommaExpected, 11, 1, 0, 11}})
+}
+
+// Depth is counted with no OnObjectBegin set; upstream only counts it when one
+// is, so there the inner object's End would end the skip.
+func TestVisitSkipCountsDepthWithoutBeginCallbacks(t *testing.T) {
+	var ends []string
+	Visit(`[{}, 1]`, Visitor{
+		OnArrayBegin:   func(Span) bool { return false },
+		OnObjectEnd:    func(Span) { ends = append(ends, "}") },
+		OnArrayEnd:     func(Span) { ends = append(ends, "]") },
+		OnLiteralValue: func(any, Span) { ends = append(ends, "1") },
+	})
+	if want := []string{"]"}; !reflect.DeepEqual(ends, want) {
+		t.Errorf("got %v, want %v", ends, want)
+	}
 }

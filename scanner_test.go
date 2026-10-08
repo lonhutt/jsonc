@@ -1,6 +1,9 @@
 package jsonc
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 // assertKinds scans text to EOF and checks the token kinds; upstream's
 // assertKinds.
@@ -186,17 +189,22 @@ func TestScanNumbers(t *testing.T) {
 }
 
 func TestScanNumberErrors(t *testing.T) {
-	assertValue(t, "1e", NumericLiteral, "1e", ScanUnexpectedEndOfNumber)
+	// the bad exponent is left out of the value, as upstream
+	assertValue(t, "1e", NumericLiteral, "1", ScanUnexpectedEndOfNumber)
+	assertValue(t, "1e+", NumericLiteral, "1", ScanUnexpectedEndOfNumber)
 	assertValue(t, "1.", NumericLiteral, "1.", ScanUnexpectedEndOfNumber)
-	assertValue(t, "-", Unknown, "-", ScanInvalidCharacter)
+	assertValue(t, "-", Unknown, "-", ScanNone)
+	assertValue(t, "-x", Unknown, "-", ScanNone)
 }
 
 func TestScanKeywords(t *testing.T) {
 	assertValue(t, "true", TrueKeyword, "true", ScanNone)
 	assertValue(t, "false", FalseKeyword, "false", ScanNone)
 	assertValue(t, "null", NullKeyword, "null", ScanNone)
-	assertValue(t, "tru", Unknown, "tru", ScanInvalidCharacter)
-	assertValue(t, "undefined", Unknown, "undefined", ScanInvalidCharacter)
+	// an unknown word is one token and no scan error; the parser reports it
+	assertValue(t, "tru", Unknown, "tru", ScanNone)
+	assertValue(t, "undefined", Unknown, "undefined", ScanNone)
+	assertValue(t, "\f", Unknown, "\f", ScanNone)
 }
 
 func TestScanLiteralSequence(t *testing.T) {
@@ -218,8 +226,8 @@ func TestScanComments(t *testing.T) {
 
 func TestScanCommentErrors(t *testing.T) {
 	assertValue(t, "/* unterminated", BlockComment, "/* unterminated", ScanUnexpectedEndOfComment)
-	assertValue(t, "/", Unknown, "/", ScanInvalidCharacter)
-	assertValue(t, "/x", Unknown, "/", ScanInvalidCharacter)
+	assertValue(t, "/", Unknown, "/", ScanNone)
+	assertValue(t, "/x", Unknown, "/", ScanNone)
 }
 
 func TestBlockCommentLineTracking(t *testing.T) {
@@ -290,4 +298,115 @@ func TestScanStringMultipleEscapes(t *testing.T) {
 			t.Errorf("Scan(%s) error = %v, want ScanNone", tc.in, s.TokenError())
 		}
 	}
+}
+
+// assertUpstreamKinds is upstream's assertKinds: the kinds in order, each with
+// no scan error.
+func assertUpstreamKinds(t *testing.T, text string, want ...SyntaxKind) {
+	t.Helper()
+	s := NewScanner(text)
+	var got []SyntaxKind
+	for k := s.Scan(); k != EOF; k = s.Scan() {
+		got = append(got, k)
+		if s.TokenError() != ScanNone {
+			t.Errorf("%q: %v at %d has %v", text, k, s.Offset(), s.TokenError())
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%q: got %v, want %v", text, got, want)
+	}
+}
+
+// assertScanError is upstream's: the first token has err, and the kinds follow.
+func assertScanError(t *testing.T, text string, err ScanError, want ...SyntaxKind) {
+	t.Helper()
+	s := NewScanner(text)
+	var got []SyntaxKind
+	for k := s.Scan(); k != EOF; k = s.Scan() {
+		if len(got) == 0 && s.TokenError() != err {
+			t.Errorf("%q: first token has %v, want %v", text, s.TokenError(), err)
+		}
+		got = append(got, k)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%q: got %v, want %v", text, got, want)
+	}
+}
+
+// Port of upstream's "tokens".
+func TestUpstreamTokens(t *testing.T) {
+	assertUpstreamKinds(t, "{", OpenBrace)
+	assertUpstreamKinds(t, "}", CloseBrace)
+	assertUpstreamKinds(t, "[", OpenBracket)
+	assertUpstreamKinds(t, "]", CloseBracket)
+	assertUpstreamKinds(t, ":", Colon)
+	assertUpstreamKinds(t, ",", Comma)
+}
+
+// Port of upstream's "comments".
+func TestUpstreamComments(t *testing.T) {
+	assertUpstreamKinds(t, "// this is a comment", LineComment)
+	assertUpstreamKinds(t, "// this is a comment\n", LineComment, LineBreak)
+	assertUpstreamKinds(t, "/* this is a comment*/", BlockComment)
+	assertUpstreamKinds(t, "/* this is a \r\ncomment*/", BlockComment)
+	assertUpstreamKinds(t, "/* this is a \ncomment*/", BlockComment)
+
+	assertScanError(t, "/* this is a", ScanUnexpectedEndOfComment, BlockComment)
+	assertScanError(t, "/* this is a \ncomment", ScanUnexpectedEndOfComment, BlockComment)
+
+	assertUpstreamKinds(t, "/ ttt", Unknown, Trivia, Unknown)
+}
+
+// Port of upstream's "strings".
+func TestUpstreamStrings(t *testing.T) {
+	for _, in := range []string{`"test"`, `"\""`, `"\/"`, `"\b"`, `"\f"`, `"\n"`, `"\r"`, `"\t"`, "\"\u88ff\"", "\"\u200b\u2028\""} {
+		assertUpstreamKinds(t, in, StringLiteral)
+	}
+	assertScanError(t, `"\v"`, ScanInvalidEscapeCharacter, StringLiteral)
+
+	assertScanError(t, `"test`, ScanUnexpectedEndOfString, StringLiteral)
+	assertScanError(t, "\"test\n\"", ScanUnexpectedEndOfString, StringLiteral, LineBreak, StringLiteral)
+
+	assertScanError(t, "\"\t\"", ScanInvalidCharacter, StringLiteral)
+	assertScanError(t, "\"\t \"", ScanInvalidCharacter, StringLiteral)
+	assertScanError(t, "\"\x00 \"", ScanInvalidCharacter, StringLiteral)
+}
+
+// Port of upstream's "numbers".
+func TestUpstreamNumbers(t *testing.T) {
+	for _, in := range []string{"0", "0.1", "-0.1", "-1", "1", "123456789", "10", "90", "90E+123", "90e+123", "90e-123", "90E-123", "90E123", "90e123"} {
+		assertUpstreamKinds(t, in, NumericLiteral)
+	}
+	assertUpstreamKinds(t, "01", NumericLiteral, NumericLiteral)
+	assertUpstreamKinds(t, "-01", NumericLiteral, NumericLiteral)
+
+	assertUpstreamKinds(t, "-", Unknown)
+	assertUpstreamKinds(t, ".0", Unknown)
+}
+
+// Port of upstream's "keywords: true, false, null".
+func TestUpstreamKeywords(t *testing.T) {
+	assertUpstreamKinds(t, "true", TrueKeyword)
+	assertUpstreamKinds(t, "false", FalseKeyword)
+	assertUpstreamKinds(t, "null", NullKeyword)
+	assertUpstreamKinds(t, "true false null", TrueKeyword, Trivia, FalseKeyword, Trivia, NullKeyword)
+
+	assertUpstreamKinds(t, "nulllll", Unknown)
+	assertUpstreamKinds(t, "True", Unknown)
+	assertUpstreamKinds(t, "foo-bar", Unknown)
+	assertUpstreamKinds(t, "foo bar", Unknown, Trivia, Unknown)
+
+	assertUpstreamKinds(t, "false//hello", FalseKeyword, LineComment)
+}
+
+// Port of upstream's "trivia".
+func TestUpstreamTrivia(t *testing.T) {
+	assertUpstreamKinds(t, " ", Trivia)
+	assertUpstreamKinds(t, "  \t  ", Trivia)
+	assertUpstreamKinds(t, "  \t  \n  \t  ", Trivia, LineBreak, Trivia)
+	assertUpstreamKinds(t, "\r\n", LineBreak)
+	assertUpstreamKinds(t, "\r", LineBreak)
+	assertUpstreamKinds(t, "\n", LineBreak)
+	assertUpstreamKinds(t, "\n\r", LineBreak, LineBreak)
+	assertUpstreamKinds(t, "\n   \n", LineBreak, Trivia, LineBreak)
 }

@@ -204,7 +204,7 @@ func (s *Scanner) scanNext() SyntaxKind {
 
 	switch {
 	case isLineBreak(c):
-		s.scanLineBreaks()
+		s.scanLineBreak()
 		s.token = LineBreak
 	case isWhitespace(c):
 		for s.pos < len(s.text) && isWhitespace(s.text[s.pos]) {
@@ -251,62 +251,65 @@ func (s *Scanner) scanNext() SyntaxKind {
 			}
 			s.pos++
 			s.token = Unknown
-			s.err = ScanInvalidCharacter
-		default:
-			if c == '-' || isDigit(c) {
-				if _, ok := s.scanNumber(); ok {
-					s.token = NumericLiteral
-					break
-				}
-				// A bare "-" still has to advance; a zero-length token
-				// spins every Scan loop forever.
-				s.pos += runeLenAt(s.text, s.pos)
+		case '-':
+			// a "-" with no digit after it is a token on its own
+			if s.pos+1 == len(s.text) || !isDigit(s.text[s.pos+1]) {
+				s.pos++
 				s.token = Unknown
-				s.err = ScanInvalidCharacter
 				break
 			}
-			if isLetter(c) {
-				start := s.pos
-				for s.pos < len(s.text) && isLetter(s.text[s.pos]) {
-					s.pos++
-				}
-				switch s.text[start:s.pos] {
-				case "true":
-					s.token = TrueKeyword
-				case "false":
-					s.token = FalseKeyword
-				case "null":
-					s.token = NullKeyword
-				default:
-					s.token = Unknown
-					s.err = ScanInvalidCharacter
-				}
+			s.token = NumericLiteral
+			s.value = s.scanNumber()
+		default:
+			if isDigit(c) {
+				s.token = NumericLiteral
+				s.value = s.scanNumber()
 				break
 			}
-			s.pos += runeLenAt(s.text, s.pos)
-			s.token = Unknown
-			s.err = ScanInvalidCharacter
+			// Anything else runs to the next separator, as one token.
+			start := s.pos
+			for s.pos < len(s.text) && isUnknownContent(s.text[s.pos]) {
+				s.pos++
+			}
+			switch s.text[start:s.pos] {
+			case "true":
+				s.token = TrueKeyword
+			case "false":
+				s.token = FalseKeyword
+			case "null":
+				s.token = NullKeyword
+			default:
+				s.token = Unknown
+			}
 		}
 	}
 
 	s.tokenLength = s.pos - s.tokenOffset
-	// scanString already set the decoded value.
-	if s.token != StringLiteral {
+	// strings and numbers already set theirs
+	if s.token != StringLiteral && s.token != NumericLiteral {
 		s.value = s.text[s.tokenOffset:s.pos]
 	}
 	return s.token
 }
 
-// scanLineBreaks consumes a run of terminators; \r\n counts as one.
-func (s *Scanner) scanLineBreaks() {
-	for s.pos < len(s.text) && isLineBreak(s.text[s.pos]) {
-		if s.text[s.pos] == '\r' && s.pos+1 < len(s.text) && s.text[s.pos+1] == '\n' {
-			s.pos++
-		}
+// scanLineBreak consumes one terminator; \r\n counts as one.
+func (s *Scanner) scanLineBreak() {
+	if s.text[s.pos] == '\r' && s.pos+1 < len(s.text) && s.text[s.pos+1] == '\n' {
 		s.pos++
-		s.lineNumber++
-		s.lineStartOffset = s.pos
 	}
+	s.pos++
+	s.lineNumber++
+	s.lineStartOffset = s.pos
+}
+
+// isUnknownContent is anything but whitespace, a line break, or a character
+// that starts some other token.
+func isUnknownContent(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', '{', '}', '[', ']', '"', ':', ',', '/':
+		return false
+	}
+	return true
 }
 
 // scanBlockCommentBody consumes everything after the opening "/*".
@@ -318,25 +321,16 @@ func (s *Scanner) scanBlockCommentBody() {
 			return
 		}
 		if isLineBreak(c) {
-			s.scanLineBreaks()
+			s.scanLineBreak()
 			continue
 		}
-		s.pos += runeLenAt(s.text, s.pos)
+		s.pos++
 	}
 	s.err = ScanUnexpectedEndOfComment
 }
 
-func isWhitespace(c byte) bool { return c == ' ' || c == '\t' || c == '\v' || c == '\f' }
+func isWhitespace(c byte) bool { return c == ' ' || c == '\t' }
 func isLineBreak(c byte) bool  { return c == '\n' || c == '\r' }
-
-// runeLenAt is never 0, so invalid UTF-8 can't stall the scanner.
-func runeLenAt(s string, i int) int {
-	_, n := utf8.DecodeRuneInString(s[i:])
-	if n == 0 {
-		return 1
-	}
-	return n
-}
 
 // scanString returns the decoded string at s.pos. Malformed input sets s.err
 // but still returns a value, as upstream does.
@@ -375,6 +369,10 @@ func (s *Scanner) scanString() string {
 			s.writeEscape(b)
 			start = s.pos
 		default:
+			if c < 0x20 {
+				// a control character is an error, but the string goes on
+				s.err = ScanInvalidCharacter
+			}
 			s.pos++
 		}
 	}
@@ -476,45 +474,48 @@ func hexVal(c byte) int {
 	return -1
 }
 
-// scanNumber returns the number at s.pos, or ok=false for a bare "-". A
-// truncated number like "1e" comes back with s.err set, as upstream does.
-func (s *Scanner) scanNumber() (string, bool) {
+// scanNumber returns the number at s.pos, which starts with a digit or a "-"
+// and a digit. A leading 0 is a number on its own, so "01" is two. A
+// truncated number like "1e" sets s.err and leaves the bad exponent out of
+// the value, as upstream does.
+func (s *Scanner) scanNumber() string {
 	start := s.pos
-	if s.pos < len(s.text) && s.text[s.pos] == '-' {
+	if s.text[s.pos] == '-' {
 		s.pos++
 	}
-	if s.pos >= len(s.text) || !isDigit(s.text[s.pos]) {
-		s.pos = start
-		return "", false
-	}
-	for s.pos < len(s.text) && isDigit(s.text[s.pos]) {
+	if s.text[s.pos] == '0' {
 		s.pos++
+	} else {
+		s.skipDigits()
 	}
 	if s.pos < len(s.text) && s.text[s.pos] == '.' {
 		s.pos++
 		if s.pos >= len(s.text) || !isDigit(s.text[s.pos]) {
 			s.err = ScanUnexpectedEndOfNumber
-			return s.text[start:s.pos], true
+			return s.text[start:s.pos]
 		}
-		for s.pos < len(s.text) && isDigit(s.text[s.pos]) {
-			s.pos++
-		}
+		s.skipDigits()
 	}
+	end := s.pos
 	if s.pos < len(s.text) && (s.text[s.pos] == 'e' || s.text[s.pos] == 'E') {
 		s.pos++
 		if s.pos < len(s.text) && (s.text[s.pos] == '+' || s.text[s.pos] == '-') {
 			s.pos++
 		}
-		if s.pos >= len(s.text) || !isDigit(s.text[s.pos]) {
+		if s.pos < len(s.text) && isDigit(s.text[s.pos]) {
+			s.skipDigits()
+			end = s.pos
+		} else {
 			s.err = ScanUnexpectedEndOfNumber
-			return s.text[start:s.pos], true
-		}
-		for s.pos < len(s.text) && isDigit(s.text[s.pos]) {
-			s.pos++
 		}
 	}
-	return s.text[start:s.pos], true
+	return s.text[start:end]
 }
 
-func isDigit(c byte) bool  { return c >= '0' && c <= '9' }
-func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+func (s *Scanner) skipDigits() {
+	for s.pos < len(s.text) && isDigit(s.text[s.pos]) {
+		s.pos++
+	}
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }

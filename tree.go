@@ -127,8 +127,9 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 	}
 
 	Visit(text, Visitor{
-		OnObjectBegin: func(s Span) {
+		OnObjectBegin: func(s Span) bool {
 			current = attach(newNode(NodeObject, s))
+			return true
 		},
 		OnObjectProperty: func(name string, s Span) {
 			// Unreachable today; Visit's recovery always stops at ',', '}' or
@@ -149,8 +150,9 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 			current = current.Parent
 			ensureProperty()
 		},
-		OnArrayBegin: func(s Span) {
+		OnArrayBegin: func(s Span) bool {
 			current = attach(newNode(NodeArray, s))
+			return true
 		},
 		OnArrayEnd: func(s Span) {
 			current.Length = s.Offset + s.Length - current.Offset

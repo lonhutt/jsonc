@@ -150,9 +150,11 @@ func Format(text string, r *Range, o FormatOptions) []Edit {
 	return f.edits
 }
 
-// lineStart returns the start of offset's line. A line that starts inside a
-// block comment goes back to the comment's line; scanning from mid-comment
-// reads its tail as tokens, which upstream does.
+// lineStart returns the start of offset's line, moved back to the start of a
+// token the line would cut off: one it starts inside (a block comment, or a
+// string an escaped line break keeps going), which scanning from mid-token
+// misreads, or an unterminated string ending right there, whose line break
+// mustn't be collapsed. Upstream does neither.
 func lineStart(text string, offset int) int {
 	for {
 		for offset > 0 && !isLineBreak(text[offset-1]) {
@@ -163,13 +165,21 @@ func lineStart(text string, offset int) int {
 		}
 		s := NewScanner(text)
 		k := s.Scan()
+		prev, prevOpen := 0, false
 		for k != EOF && s.Offset()+s.Length() <= offset {
+			prev, prevOpen = s.Offset(), k == StringLiteral && s.TokenError() == ScanUnexpectedEndOfString
 			k = s.Scan()
 		}
-		if k != BlockComment || s.Offset() >= offset {
+		switch {
+		case prevOpen && k != EOF && s.Offset() == offset:
+			offset = prev
+		// A range starting between \r and \n only splits whitespace; upstream
+		// leaves that alone too.
+		case k == EOF || k == LineBreak || s.Offset() >= offset:
 			return offset
+		default:
+			offset = s.Offset()
 		}
-		offset = s.Offset()
 	}
 }
 
@@ -225,7 +235,7 @@ func (f *formatter) scanNext() SyntaxKind {
 	for token == Trivia || token == LineBreak {
 		if token == LineBreak {
 			if f.o.KeepLines {
-				f.numberLineBreaks += countLineBreaks(f.scanText[f.s.Offset() : f.s.Offset()+f.s.Length()])
+				f.numberLineBreaks++
 			} else {
 				f.numberLineBreaks = 1
 			}
@@ -243,19 +253,6 @@ func (f *formatter) indent(level int) string {
 		return ""
 	}
 	return strings.Repeat(f.indentUnit, level)
-}
-
-// countLineBreaks counts terminators in a LineBreak token; "\r\n" is one. Our
-// scanner gives a whole run one token, where upstream gives each its own, so
-// KeepLines has to count inside it or blank lines are lost.
-func countLineBreaks(run string) int {
-	n := 0
-	for i := 0; i < len(run); i++ {
-		if run[i] == '\n' || i+1 == len(run) || run[i+1] != '\n' {
-			n++
-		}
-	}
-	return n
 }
 
 func (f *formatter) newLinesAndIndent() string {

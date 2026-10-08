@@ -770,10 +770,11 @@ func TestFormatKeepsTheBreakAfterAnUnterminatedString(t *testing.T) {
 	}
 }
 
-// A range's line can start inside a block comment; scanning from the line
-// start then reads the comment's tail as tokens. Upstream does, and edits the
-// inside of `"}"` here.
-func TestFormatRangeStartingInsideABlockComment(t *testing.T) {
+// A range's line can start inside a token: a block comment, or a string whose
+// escaped line break keeps it going. Scanning from the line start then reads
+// the token's tail as tokens. Upstream does, and edits the inside of `"}"`
+// here.
+func TestFormatRangeStartingInsideAToken(t *testing.T) {
 	for _, tc := range []struct {
 		in string
 		r  Range
@@ -781,6 +782,10 @@ func TestFormatRangeStartingInsideABlockComment(t *testing.T) {
 		{"/*\n\"*/{\"}\": 42}", Range{Offset: 3, Length: 13}},
 		{"{\n  /* a\n  \"*/ \"b\":1}", Range{Offset: 9, Length: 5}},
 		{"/* a\nb */ /* c\n\" */ [1,2]", Range{Offset: 16, Length: 5}},
+		{"\"\\\n00 ", Range{Offset: 4, Length: 67}},
+		{"[\"a\\\n  b\" ,  1]", Range{Offset: 6, Length: 4}},
+		// the line starts at the break that ends an unterminated string
+		{"\"\\\n\n0", Range{Offset: 3, Length: 47}},
 	} {
 		got, err := applyEditsForTest(tc.in, Format(tc.in, &tc.r, spaces2()))
 		if err != nil {
@@ -818,8 +823,7 @@ func TestFormatKeepLinesBlankLines(t *testing.T) {
 	// every blank line is kept; upstream doesn't cap the run
 	assertFormat(t, "{\n\"a\": 1,\n\n\"b\": 2\n}", "{\n  \"a\": 1,\n\n  \"b\": 2\n}", o)
 	assertFormat(t, "{\n\"a\": 1,\n\n\n\n\"b\": 2\n}", "{\n  \"a\": 1,\n\n\n\n  \"b\": 2\n}", o)
-	// our scanner gives a run of breaks one token, so the count comes from
-	// inside it; CRLF is one
+	// CRLF is one break
 	assertFormat(t, "{\r\n\r\n\"a\":1}", "{\r\n\r\n  \"a\": 1 }", o)
 	assertFormat(t, "{\r\"a\":1\r\r}", "{\r  \"a\": 1\r\r}", o)
 	// whitespace between breaks doesn't merge them
@@ -828,17 +832,6 @@ func TestFormatKeepLinesBlankLines(t *testing.T) {
 	assertFormat(t, "{\"a\":\n\n1}", "{ \"a\":\n\n  1 }", o)
 	assertFormat(t, "[1\n,2]", "[ 1\n  , 2 ]", o)
 	assertFormat(t, "{\"a\":1}\n\n\n", "{ \"a\": 1 }\n\n\n", o)
-}
-
-func TestCountLineBreaks(t *testing.T) {
-	for run, want := range map[string]int{
-		"\n": 1, "\r": 1, "\r\n": 1, "\n\n": 2, "\r\r": 2, "\n\r": 2,
-		"\r\n\r\n": 2, "\r\r\n": 2, "\n\r\n\r": 3,
-	} {
-		if got := countLineBreaks(run); got != want {
-			t.Errorf("countLineBreaks(%q) = %d, want %d", run, got, want)
-		}
-	}
 }
 
 // Upstream emits leading breaks as an insert at 0 plus a delete of the gap;
@@ -1144,6 +1137,73 @@ func TestFormatPropertiesForRanges(t *testing.T) {
 					t.Fatalf("%q %+v: token sequence changed -> %q\n before %q\n after %q", in, r, got, before, after)
 				}
 			}
+		}
+	}
+}
+
+// Ports of upstream format.test.ts, transcribed from its literal inputs and
+// expectations. A "|" pair in the input marks the range, as upstream.
+var upstreamFormatCases = []struct {
+	name, in, want                  string
+	spaces, finalNewline, keepLines bool
+}{
+	{"object - single property", "{\"x\" : 1}", "{\n  \"x\": 1\n}", true, false, false},
+	{"object - multiple properties", "{\"x\" : 1,  \"y\" : \"foo\", \"z\"  : true}", "{\n  \"x\": 1,\n  \"y\": \"foo\",\n  \"z\": true\n}", true, false, false},
+	{"object - no properties ", "{\"x\" : {    },  \"y\" : {}}", "{\n  \"x\": {},\n  \"y\": {}\n}", true, false, false},
+	{"object - nesting", "{\"x\" : {  \"y\" : { \"z\"  : { }}, \"a\": true}}", "{\n  \"x\": {\n    \"y\": {\n      \"z\": {}\n    },\n    \"a\": true\n  }\n}", true, false, false},
+	{"array - single items", "[\"[]\"]", "[\n  \"[]\"\n]", true, false, false},
+	{"array - multiple items", "[true,null,1.2]", "[\n  true,\n  null,\n  1.2\n]", true, false, false},
+	{"array - no items", "[      ]", "[]", true, false, false},
+	{"array - nesting", "[ [], [ [ {} ], \"a\" ]  ]", "[\n  [],\n  [\n    [\n      {}\n    ],\n    \"a\"\n  ]\n]", true, false, false},
+	{"syntax errors", "[ null  1.2 \"Hello\" ]", "[\n  null  1.2 \"Hello\"\n]", true, false, false},
+	{"syntax errors 2", "{\"a\":\"b\"\"c\":\"d\" }", "{\n  \"a\": \"b\"\"c\": \"d\"\n}", true, false, false},
+	{"empty lines", "{\n\"a\": true,\n\n\"b\": true\n}", "{\n\t\"a\": true,\n\t\"b\": true\n}", false, false, false},
+	{"single line comment", "[ \n//comment\n\"foo\", \"bar\"\n] ", "[\n  //comment\n  \"foo\",\n  \"bar\"\n]", true, false, false},
+	{"block line comment", "[{\n        /*comment*/     \n\"foo\" : true\n}] ", "[\n  {\n    /*comment*/\n    \"foo\": true\n  }\n]", true, false, false},
+	{"single line comment on same line", " {  \n        \"a\": {}// comment    \n } ", "{\n  \"a\": {} // comment    \n}", true, false, false},
+	{"single line comment on same line 2", "{ //comment\n}", "{ //comment\n}", true, false, false},
+	{"block comment on same line", "{      \"a\": {}, /*comment*/    \n        /*comment*/ \"b\": {},    \n        \"c\": {/*comment*/}    } ", "{\n  \"a\": {}, /*comment*/\n  /*comment*/ \"b\": {},\n  \"c\": { /*comment*/}\n}", true, false, false},
+	{"block comment on same line advanced", " {       \"d\": [\n             null\n        ] /*comment*/\n        ,\"e\": /*comment*/ [null] }", "{\n  \"d\": [\n    null\n  ] /*comment*/,\n  \"e\": /*comment*/ [\n    null\n  ]\n}", true, false, false},
+	{"multiple block comments on same line", "{      \"a\": {} /*comment*/, /*comment*/   \n        /*comment*/ \"b\": {}  /*comment*/  } ", "{\n  \"a\": {} /*comment*/, /*comment*/\n  /*comment*/ \"b\": {} /*comment*/\n}", true, false, false},
+	{"multiple mixed comments on same line", "[ /*comment*/  /*comment*/   // comment \n]", "[ /*comment*/ /*comment*/ // comment \n]", true, false, false},
+	{"range", "{ \"a\": {},\n|\"b\": [null, null]|\n} ", "{ \"a\": {},\n\"b\": [\n  null,\n  null\n]\n} ", true, false, false},
+	{"range with existing indent", "{ \"a\": {},\n   |\"b\": [null],\n\"c\": {}\n}|", "{ \"a\": {},\n   \"b\": [\n    null\n  ],\n  \"c\": {}\n}", true, false, false},
+	{"range with existing indent - tabs", "{ \"a\": {},\n|  \"b\": [null],   \n\"c\": {}\n}|    ", "{ \"a\": {},\n\t\"b\": [\n\t\tnull\n\t],\n\t\"c\": {}\n}", false, false, false},
+	{"property range - issue 14623", "{ |\"a\" :| 1,\n  \"b\": 1\n}", "{ \"a\": 1,\n  \"b\": 1\n}", false, false, false},
+	{"block comment none-line breaking symbols", "{ \"a\": [ 1\n/* comment */\n, 2\n/* comment */\n]\n/* comment */\n,\n \"b\": true\n/* comment */\n}", "{\n  \"a\": [\n    1\n    /* comment */\n    ,\n    2\n    /* comment */\n  ]\n  /* comment */\n  ,\n  \"b\": true\n  /* comment */\n}", true, false, false},
+	{"line comment after none-line breaking symbols", "{ \"a\":\n// comment\nnull,\n \"b\"\n// comment\n: null\n// comment\n}", "{\n  \"a\":\n  // comment\n  null,\n  \"b\"\n  // comment\n  : null\n  // comment\n}", true, false, false},
+	{"line comment, enforce line comment ", "{\"settings\": // This is some text\n{\n\"foo\": 1\n}\n}", "{\n  \"settings\": // This is some text\n  {\n    \"foo\": 1\n  }\n}", true, false, false},
+	{"random content", "a 1 b 1 3 true", "a 1 b 1 3 true", true, false, false},
+	{"insertFinalNewline", "{\n}", "{}\n", true, true, false},
+	{"adjust the indentation of a one-line array", "{ \"array\": [1,2,3]\n}", "{ \"array\": [ 1, 2, 3 ]\n}", true, false, true},
+	{"adjust the indentation of a multi-line array", "{\"array\":\n [1,2,\n 3]\n}", "{ \"array\":\n  [ 1, 2,\n    3 ]\n}", true, false, true},
+	{"adjust the identation of a one-line object", "{\"settings\": // This is some text\n{\"foo\": 1}\n}", "{ \"settings\": // This is some text\n  { \"foo\": 1 }\n}", true, false, true},
+	{"multiple line breaks are kept", "{\"settings\":\n\n\n\n{\"foo\": 1}\n}", "{ \"settings\":\n\n\n\n  { \"foo\": 1 }\n}", true, false, true},
+	{"adjusting multiple line breaks and a block comment, line breaks are kept", "{\"settings\":\n\n\n{\"foo\": 1} /* this is a multiline\ncomment */\n}", "{ \"settings\":\n\n\n  { \"foo\": 1 } /* this is a multiline\ncomment */\n}", true, false, true},
+	{"colon is kept on its own line", "{\"settings\"\n:\n{\"foo\"\n:\n1}\n}", "{ \"settings\"\n  :\n  { \"foo\"\n    :\n    1 }\n}", true, false, true},
+	{"adjusting the indentation of a nested multi-line array", "{\n\n{\n\n\"array\"   : [1, 2\n3, 4]\n}\n}", "{\n\n  {\n\n    \"array\": [ 1, 2\n      3, 4 ]\n  }\n}", true, false, true},
+	{"adjusting the indentation for a series of empty arrays or objects", "{\n\n}\n\n{\n[\n]\n}", "{\n\n}\n\n{\n  [\n  ]\n}", true, false, true},
+	{"adjusting the indentation for a series of multiple empty lines at the end", "{\n}\n\n\n", "{\n}\n\n\n", true, false, true},
+	{"adjusting the indentation for comments on separate lines", "\n\n\n   // comment 1\n\n\n\n  /* comment 2 */\nconst", "\n\n\n// comment 1\n\n\n\n/* comment 2 */\nconst", true, false, true},
+}
+
+func TestUpstreamFormat(t *testing.T) {
+	for _, tc := range upstreamFormatCases {
+		in := tc.in
+		var r *Range
+		if start, end := strings.Index(in, "|"), strings.LastIndex(in, "|"); start != -1 && end != start {
+			in = in[:start] + in[start+1:end] + in[end+1:]
+			// end is the second "|" before the first was removed, so this runs
+			// one byte past it; upstream's harness does the same
+			r = &Range{Offset: start, Length: end - start}
+		}
+		o := FormatOptions{TabSize: 2, InsertSpaces: tc.spaces, EOL: "\n", InsertFinalNewline: tc.finalNewline, KeepLines: tc.keepLines}
+		got, err := applyEditsForTest(in, Format(in, r, o))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got != tc.want {
+			t.Errorf("%s:\n got %q\nwant %q", tc.name, got, tc.want)
 		}
 	}
 }

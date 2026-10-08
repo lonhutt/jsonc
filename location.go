@@ -75,17 +75,18 @@ func GetLocation(text string, offset int) Location {
 	}
 
 	Visit(text, Visitor{
-		OnObjectBegin: func(s Span) {
+		OnObjectBegin: func(s Span) bool {
 			if done {
-				return
+				return true
 			}
 			if offset <= s.Offset {
 				done = true
-				return
+				return true
 			}
 			previousNode = nil
 			isAtPropertyKey = true
 			segments = append(segments, "") // first key, not typed yet
+			return true
 		},
 		OnObjectProperty: func(name string, s Span) {
 			if done {
@@ -113,16 +114,17 @@ func GetLocation(text string, offset int) Location {
 			previousNode = nil
 			segments = segments[:len(segments)-1]
 		},
-		OnArrayBegin: func(s Span) {
+		OnArrayBegin: func(s Span) bool {
 			if done {
-				return
+				return true
 			}
 			if offset <= s.Offset {
 				done = true
-				return
+				return true
 			}
 			previousNode = nil
 			segments = append(segments, 0)
+			return true
 		},
 		OnArrayEnd: func(s Span) {
 			if done {

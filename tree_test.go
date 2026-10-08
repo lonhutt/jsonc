@@ -321,3 +321,169 @@ func TestFindNodeAtOffsetOutOfRange(t *testing.T) {
 		t.Error("nil root should return nil")
 	}
 }
+
+// tn is a node as upstream's tree tests write it: Colon 0 means no
+// colonOffset, and an empty container has no children.
+type tn struct {
+	Type           NodeType
+	Offset, Length int
+	Colon          int
+	Value          any
+	Children       []tn
+}
+
+// te is a tree error as upstream's tests write it.
+type te struct {
+	Code           ParseErrorCode
+	Offset, Length int
+}
+
+func toTN(t *testing.T, n *Node) tn {
+	t.Helper()
+	out := tn{Type: n.Type, Offset: n.Offset, Length: n.Length, Value: n.Literal}
+	if n.ColonOffset != -1 {
+		out.Colon = n.ColonOffset
+	}
+	for _, c := range n.Children {
+		if c.Parent != n {
+			t.Errorf("%v at %d: a child's Parent isn't its parent", c.Type, c.Offset)
+		}
+		out.Children = append(out.Children, toTN(t, c))
+	}
+	return out
+}
+
+// assertTree is upstream's assertTree.
+func assertTree(t *testing.T, in string, want tn, wantErrs ...te) {
+	t.Helper()
+	root, errs := ParseTree(in)
+	var gotErrs []te
+	for _, e := range errs {
+		gotErrs = append(gotErrs, te{e.Code, e.Offset, e.Length})
+	}
+	if !reflect.DeepEqual(gotErrs, wantErrs) {
+		t.Errorf("ParseTree(%q) errors = %v, want %v", in, gotErrs, wantErrs)
+	}
+	if got := toTN(t, root); !reflect.DeepEqual(got, want) {
+		t.Errorf("ParseTree(%q):\n got %+v\nwant %+v", in, got, want)
+	}
+}
+
+// Port of upstream's "tree: literals".
+func TestUpstreamTreeLiterals(t *testing.T) {
+	assertTree(t, "true", tn{Type: NodeBoolean, Length: 4, Value: true})
+	assertTree(t, "false", tn{Type: NodeBoolean, Length: 5, Value: false})
+	assertTree(t, "null", tn{Type: NodeNull, Length: 4})
+	assertTree(t, "23", tn{Type: NodeNumber, Length: 2, Value: 23.0})
+	assertTree(t, "-1.93e-19", tn{Type: NodeNumber, Length: 9, Value: -1.93e-19})
+	assertTree(t, `"hello"`, tn{Type: NodeString, Length: 7, Value: "hello"})
+}
+
+// Port of upstream's "tree: arrays".
+func TestUpstreamTreeArrays(t *testing.T) {
+	assertTree(t, "[]", tn{Type: NodeArray, Length: 2})
+	assertTree(t, "[ 1 ]", tn{Type: NodeArray, Length: 5, Children: []tn{{Type: NodeNumber, Offset: 2, Length: 1, Value: 1.0}}})
+	assertTree(t, `[ 1,"x"]`, tn{Type: NodeArray, Length: 8, Children: []tn{
+		{Type: NodeNumber, Offset: 2, Length: 1, Value: 1.0},
+		{Type: NodeString, Offset: 4, Length: 3, Value: "x"},
+	}})
+	assertTree(t, "[[]]", tn{Type: NodeArray, Length: 4, Children: []tn{{Type: NodeArray, Offset: 1, Length: 2}}})
+}
+
+// Port of upstream's "tree: objects".
+func TestUpstreamTreeObjects(t *testing.T) {
+	assertTree(t, "{ }", tn{Type: NodeObject, Length: 3})
+	assertTree(t, `{ "val": 1 }`, tn{Type: NodeObject, Length: 12, Children: []tn{
+		{Type: NodeProperty, Offset: 2, Length: 8, Colon: 7, Children: []tn{
+			{Type: NodeString, Offset: 2, Length: 5, Value: "val"},
+			{Type: NodeNumber, Offset: 9, Length: 1, Value: 1.0},
+		}},
+	}})
+	assertTree(t, `{"id": "$", "v": [ null, null] }`, tn{Type: NodeObject, Length: 32, Children: []tn{
+		{Type: NodeProperty, Offset: 1, Length: 9, Colon: 5, Children: []tn{
+			{Type: NodeString, Offset: 1, Length: 4, Value: "id"},
+			{Type: NodeString, Offset: 7, Length: 3, Value: "$"},
+		}},
+		{Type: NodeProperty, Offset: 12, Length: 18, Colon: 15, Children: []tn{
+			{Type: NodeString, Offset: 12, Length: 3, Value: "v"},
+			{Type: NodeArray, Offset: 17, Length: 13, Children: []tn{
+				{Type: NodeNull, Offset: 19, Length: 4},
+				{Type: NodeNull, Offset: 25, Length: 4},
+			}},
+		}},
+	}})
+	assertTree(t, `{  "id": { "foo": { } } , }`, tn{Type: NodeObject, Length: 27, Children: []tn{
+		{Type: NodeProperty, Offset: 3, Length: 20, Colon: 7, Children: []tn{
+			{Type: NodeString, Offset: 3, Length: 4, Value: "id"},
+			{Type: NodeObject, Offset: 9, Length: 14, Children: []tn{
+				{Type: NodeProperty, Offset: 11, Length: 10, Colon: 16, Children: []tn{
+					{Type: NodeString, Offset: 11, Length: 5, Value: "foo"},
+					{Type: NodeObject, Offset: 18, Length: 3},
+				}},
+			}},
+		}},
+	}}, te{PropertyNameExpected, 26, 1}, te{ValueExpected, 26, 1})
+}
+
+// Port of the tree half of upstream's "visit: incomplete".
+func TestUpstreamTreeIncomplete(t *testing.T) {
+	assertTree(t, `{"prop1":"foo","prop2":"foo2","prop3":{"prp1":{""}}}`, tn{Type: NodeObject, Length: 52, Children: []tn{
+		{Type: NodeProperty, Offset: 1, Length: 13, Colon: 8, Children: []tn{
+			{Type: NodeString, Offset: 1, Length: 7, Value: "prop1"},
+			{Type: NodeString, Offset: 9, Length: 5, Value: "foo"},
+		}},
+		{Type: NodeProperty, Offset: 15, Length: 14, Colon: 22, Children: []tn{
+			{Type: NodeString, Offset: 15, Length: 7, Value: "prop2"},
+			{Type: NodeString, Offset: 23, Length: 6, Value: "foo2"},
+		}},
+		{Type: NodeProperty, Offset: 30, Length: 21, Colon: 37, Children: []tn{
+			{Type: NodeString, Offset: 30, Length: 7, Value: "prop3"},
+			{Type: NodeObject, Offset: 38, Length: 13, Children: []tn{
+				{Type: NodeProperty, Offset: 39, Length: 11, Colon: 45, Children: []tn{
+					{Type: NodeString, Offset: 39, Length: 6, Value: "prp1"},
+					{Type: NodeObject, Offset: 46, Length: 4, Children: []tn{
+						// upstream's Length is 3, taking the '}' that closes a
+						// property with no value; ours stops before it
+						{Type: NodeProperty, Offset: 47, Length: 2, Children: []tn{
+							{Type: NodeString, Offset: 47, Length: 2, Value: ""},
+						}},
+					}},
+				}},
+			}},
+		}},
+	}}, te{ColonExpected, 49, 1})
+}
+
+// Port of upstream's "tree: find location".
+func TestUpstreamFindLocation(t *testing.T) {
+	root, _ := ParseTree(`{ "key1": { "key11": [ "val111", "val112" ] }, "key2": [ { "key21": false, "key22": 221 }, null, [{}] ], "key3": { "key31":, "key32": 32 } }`)
+	for _, tc := range []struct {
+		path Path
+		want any
+	}{
+		{Path{"key1"}, obj{"key11": arr{"val111", "val112"}}},
+		{Path{"key1", "key11"}, arr{"val111", "val112"}},
+		{Path{"key1", "key11", 0}, "val111"},
+		{Path{"key1", "key11", 1}, "val112"},
+		{Path{"key1", "key11", 2}, nil},
+		{Path{"key2", 0, "key21"}, false},
+		{Path{"key2", 0, "key22"}, 221.0},
+		{Path{"key2", 1}, nil},
+		{Path{"key2", 2}, arr{obj{}}},
+		{Path{"key2", 2, 0}, obj{}},
+		{Path{"key3", "key31", "key311"}, nil},
+		{Path{"key3", "key32"}, 32.0},
+	} {
+		n := FindNodeAtLocation(root, tc.path)
+		var got any
+		if n != nil {
+			got = n.Value()
+			if !reflect.DeepEqual(n.Path(), tc.path) {
+				t.Errorf("%v: node path is %v", tc.path, n.Path())
+			}
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%v: got %#v, want %#v", tc.path, got, tc.want)
+		}
+	}
+}
