@@ -135,10 +135,7 @@ func Format(text string, r *Range, o FormatOptions) []Edit {
 
 		// Widen back to the line start; the starting indent comes from there, or a
 		// nested block would be re-indented as depth 0.
-		start := f.rangeStart
-		for start > 0 && !isLineBreak(text[start-1]) {
-			start--
-		}
+		start := lineStart(text, f.rangeStart)
 		// Widen to the line end, so the last gap is scanned in full.
 		end := f.rangeEnd
 		for end < len(text) && !isLineBreak(text[end]) {
@@ -151,6 +148,29 @@ func Format(text string, r *Range, o FormatOptions) []Edit {
 	f.s = NewScanner(f.scanText)
 	f.run()
 	return f.edits
+}
+
+// lineStart returns the start of offset's line. A line that starts inside a
+// block comment goes back to the comment's line; scanning from mid-comment
+// reads its tail as tokens, which upstream does.
+func lineStart(text string, offset int) int {
+	for {
+		for offset > 0 && !isLineBreak(text[offset-1]) {
+			offset--
+		}
+		if offset == 0 {
+			return 0
+		}
+		s := NewScanner(text)
+		k := s.Scan()
+		for k != EOF && s.Offset()+s.Length() <= offset {
+			k = s.Scan()
+		}
+		if k != BlockComment || s.Offset() >= offset {
+			return offset
+		}
+		offset = s.Offset()
+	}
 }
 
 func clamp(v, lo, hi int) int {
@@ -266,6 +286,9 @@ func (f *formatter) run() {
 
 	for firstToken != EOF {
 		firstEnd := f.tokenEnd()
+		// An unterminated string ends at the line break after it; collapsing
+		// that gap pulls the next token into the string. Upstream does.
+		openString := firstToken == StringLiteral && f.s.TokenError() == ScanUnexpectedEndOfString
 		secondToken := f.scanNext()
 
 		replaceContent := ""
@@ -372,6 +395,9 @@ func (f *formatter) run() {
 			}
 		}
 
+		if openString && secondToken != EOF {
+			f.hasError = true
+		}
 		f.addEdit(replaceContent, firstEnd, f.tokenStart())
 		firstToken = secondToken
 	}

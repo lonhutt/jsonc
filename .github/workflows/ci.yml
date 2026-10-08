@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ['1.24', stable]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race -cover ./...
+      - run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
+
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [FuzzScanner, FuzzParse, FuzzFormatIdempotent, FuzzModifyApply]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime=30s ./...

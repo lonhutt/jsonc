@@ -754,6 +754,44 @@ func rangeString(r *Range) string {
 
 func itoa(i int) string { return strconv.Itoa(i) }
 
+// An unterminated string ends at the line break after it; collapsing that gap
+// pulls the next token into the string. Upstream does: `{"a\n:1}` -> `{"a: 1}`.
+func TestFormatKeepsTheBreakAfterAnUnterminatedString(t *testing.T) {
+	for _, in := range []string{"\"0\n0", "{\"a\n:1}", "[\"a\n,1]", "[\"a\n1]", "{\"a\": \"b\n}"} {
+		for _, r := range []*Range{nil, {Offset: 1, Length: len(in)}} {
+			got, err := applyEditsForTest(in, Format(in, r, spaces2()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before, after := tokenSignature(in), tokenSignature(got); !reflect.DeepEqual(before, after) {
+				t.Errorf("Format(%q, %v) = %q: tokens changed", in, r, got)
+			}
+		}
+	}
+}
+
+// A range's line can start inside a block comment; scanning from the line
+// start then reads the comment's tail as tokens. Upstream does, and edits the
+// inside of `"}"` here.
+func TestFormatRangeStartingInsideABlockComment(t *testing.T) {
+	for _, tc := range []struct {
+		in string
+		r  Range
+	}{
+		{"/*\n\"*/{\"}\": 42}", Range{Offset: 3, Length: 13}},
+		{"{\n  /* a\n  \"*/ \"b\":1}", Range{Offset: 9, Length: 5}},
+		{"/* a\nb */ /* c\n\" */ [1,2]", Range{Offset: 16, Length: 5}},
+	} {
+		got, err := applyEditsForTest(tc.in, Format(tc.in, &tc.r, spaces2()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if before, after := tokenSignature(tc.in), tokenSignature(got); !reflect.DeepEqual(before, after) {
+			t.Errorf("Format(%q, %+v) = %q: tokens changed", tc.in, tc.r, got)
+		}
+	}
+}
+
 // --- KeepLines and InsertFinalNewline ---------------------------------------
 
 // Expected strings come from node-jsonc-parser 3.3.1.

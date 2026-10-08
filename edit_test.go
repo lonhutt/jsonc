@@ -349,6 +349,13 @@ func TestModifyDanglingProperty(t *testing.T) {
 	assertModify(t, `{"a" 1}`, Path{"b"}, 1, ModifyOptions{}, `{"a" 1,"b": 1}`)
 }
 
+// The inserted line starts inside the comment; upstream formats `"*/{` as a
+// string and puts a line break inside the new key. Read as a comment, it gets
+// one space after it, same as upstream gives `/* x */{}`.
+func TestModifyAfterAMultiLineComment(t *testing.T) {
+	assertModify(t, "/*\n\"*/{}", Path{"}"}, 42, modifyOpts(), "/*\n\"*/ {\n  \"}\": 42\n}")
+}
+
 func TestModifyNilIsNull(t *testing.T) {
 	assertModify(t, `{"a": 1}`, Path{"a"}, nil, ModifyOptions{}, `{"a": null}`)
 }
