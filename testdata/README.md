@@ -22,14 +22,21 @@ case count, so a truncated file fails. Every other line is one case:
 
 ## modify-golden.jsonl
 
-The same for `modify()`: 13068 cases over documents x paths x values x
-options, plus where a new key goes. A case upstream throws on records
-`"error": true`, and Modify has to fail there too. `TestModifyGoldenCorpus`
-also reads each written value back.
+The same for `modify()`, Remove included: 22204 cases over documents x paths
+x values x options, plus where a new key goes and `isArrayInsertion`. A
+removal records `"remove": true` in place of a value (JSON has no
+`undefined`), and a case upstream throws on records `"error": true`, so we
+have to fail there too. `TestModifyGoldenCorpus` also reads each written
+value back and checks what's left after each removal.
 
-Two documents are skipped by name, `{"a":}` and `{"a" 1}`; upstream's tree
-ends a property with no value after the `}` that closes it, so its Modify
-writes outside the object. Ours ends before the `}`.
+Where we differ on purpose, the test says so by name instead of comparing:
+
+- `{"a":}` and `{"a" 1}` are skipped; upstream's tree ends a property with no
+  value after the `}` that closes it, so its Modify writes outside the object
+- `"range"`, `"negative"`: an array index upstream crashes on (or answers with
+  an emptied array, or the text `undefined`); we have to return an error
+- `"merge"`: removing the last element of a one-line array, where upstream
+  gives `[1,2]` -> `[12]`; we have to leave the right value
 
 ## Regenerating
 

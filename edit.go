@@ -72,10 +72,23 @@ type ModifyOptions struct {
 }
 
 // Modify returns the edit that sets the value at path, creating missing
-// parents along the way. An empty path replaces the whole document.
+// parents along the way. An empty path replaces the whole document. An index
+// of -1, or one past the end, appends to an array.
 //
 // value is encoded with encoding/json; nil is JSON null, not a deletion.
 func Modify(text string, path Path, value any, o ModifyOptions) ([]Edit, error) {
+	return setProperty(text, path, value, false, o)
+}
+
+// Remove returns the edit that deletes the value at path, with one adjacent
+// comma. Comments inside the removed span go too, as upstream. A missing
+// property is no edit; a missing parent or array element is an error.
+func Remove(text string, path Path, o ModifyOptions) ([]Edit, error) {
+	return setProperty(text, path, nil, true, o)
+}
+
+// setProperty is upstream's setProperty; remove stands in for its undefined.
+func setProperty(text string, path Path, value any, remove bool, o ModifyOptions) ([]Edit, error) {
 	for i, seg := range path {
 		switch seg.(type) {
 		case string, int:
@@ -87,9 +100,9 @@ func Modify(text string, path Path, value any, o ModifyOptions) ([]Edit, error) 
 	root, _ := ParseTree(text)
 	var parent *Node
 	var last any
-	for len(path) > 0 {
-		last, path = path[len(path)-1], path[:len(path)-1]
-		if parent = FindNodeAtLocation(root, path); parent != nil {
+	for rest := path; len(rest) > 0; {
+		last, rest = rest[len(rest)-1], rest[:len(rest)-1]
+		if parent = FindNodeAtLocation(root, rest); parent != nil || remove {
 			break
 		}
 		if key, ok := last.(string); ok {
@@ -99,12 +112,14 @@ func Modify(text string, path Path, value any, o ModifyOptions) ([]Edit, error) 
 		}
 	}
 
-	content, err := marshal(value)
-	if err != nil {
-		return nil, err
-	}
-
 	if parent == nil {
+		if remove {
+			return nil, fmt.Errorf("jsonc: nothing to remove at %v", path)
+		}
+		content, err := marshal(value)
+		if err != nil {
+			return nil, err
+		}
 		e := Edit{Content: content}
 		if root != nil {
 			e.Offset, e.Length = root.Offset, root.Length
@@ -115,9 +130,9 @@ func Modify(text string, path Path, value any, o ModifyOptions) ([]Edit, error) 
 	key, isKey := last.(string)
 	switch {
 	case parent.Type == NodeObject && isKey:
-		return modifyProperty(text, parent, key, content, o)
+		return setObjectProperty(text, parent, key, value, remove, o)
 	case parent.Type == NodeArray && !isKey:
-		return nil, fmt.Errorf("jsonc: setting an array element isn't supported yet")
+		return setArrayElement(text, parent, last.(int), value, remove, o)
 	case isKey:
 		return nil, fmt.Errorf("jsonc: can't set property %q on a %s", key, parent.Type)
 	default:
@@ -125,8 +140,29 @@ func Modify(text string, path Path, value any, o ModifyOptions) ([]Edit, error) 
 	}
 }
 
-func modifyProperty(text string, parent *Node, key, content string, o ModifyOptions) ([]Edit, error) {
-	if existing := FindNodeAtLocation(parent, Path{key}); existing != nil {
+func setObjectProperty(text string, parent *Node, key string, value any, remove bool, o ModifyOptions) ([]Edit, error) {
+	children := parent.Children
+	existing := FindNodeAtLocation(parent, Path{key})
+	if remove {
+		if existing == nil {
+			return nil, nil
+		}
+		i := slices.Index(children, existing.Parent)
+		begin, end := parent.Offset+1, existing.Parent.Offset+existing.Parent.Length
+		if i > 0 {
+			prev := children[i-1]
+			begin = prev.Offset + prev.Length
+		} else if len(children) > 1 {
+			end = children[1].Offset
+		}
+		return withFormatting(text, Edit{Offset: begin, Length: end - begin}, o)
+	}
+
+	content, err := marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
 		return withFormatting(text, Edit{Offset: existing.Offset, Length: existing.Length, Content: content}, o)
 	}
 
@@ -136,7 +172,6 @@ func modifyProperty(text string, parent *Node, key, content string, o ModifyOpti
 	}
 	property := encodedKey + ": " + content
 
-	children := parent.Children
 	index := len(children)
 	if o.GetInsertionIndex != nil {
 		names := make([]string, len(children))
@@ -155,6 +190,59 @@ func modifyProperty(text string, parent *Node, key, content string, o ModifyOpti
 		e = Edit{Offset: parent.Offset + 1, Content: property}
 	default:
 		e = Edit{Offset: parent.Offset + 1, Content: property + ","}
+	}
+	return withFormatting(text, e, o)
+}
+
+func setArrayElement(text string, parent *Node, index int, value any, remove bool, o ModifyOptions) ([]Edit, error) {
+	children := parent.Children
+	n := len(children)
+
+	if remove {
+		// Upstream crashes, empties the array, or inserts "undefined" here.
+		if index < 0 || index >= n {
+			return nil, fmt.Errorf("jsonc: no element %d to remove from an array of %d", index, n)
+		}
+		var e Edit
+		switch {
+		case n == 1:
+			e = Edit{Offset: parent.Offset + 1, Length: parent.Length - 2}
+		case index == n-1:
+			// Upstream stops 2 bytes before the array's end, assuming "\n]";
+			// on `[1,2]` that keeps the last digit and gives `[12]`.
+			prev, last := children[index-1], children[index]
+			begin := prev.Offset + prev.Length
+			end := max(parent.Offset+parent.Length-2, last.Offset+last.Length)
+			e = Edit{Offset: begin, Length: end - begin}
+		default:
+			e = Edit{Offset: children[index].Offset, Length: children[index+1].Offset - children[index].Offset}
+		}
+		return withFormatting(text, e, o)
+	}
+
+	if index < -1 {
+		return nil, fmt.Errorf("jsonc: can't set element %d of an array", index)
+	}
+	content, err := marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var e Edit
+	switch {
+	case index == -1 && n == 0:
+		e = Edit{Offset: parent.Offset + 1, Content: content}
+	case index == -1:
+		prev := children[n-1]
+		e = Edit{Offset: prev.Offset + prev.Length, Content: "," + content}
+	case !o.IsArrayInsertion && index < n:
+		e = Edit{Offset: children[index].Offset, Length: children[index].Length, Content: content}
+	case n == 0:
+		e = Edit{Offset: parent.Offset + 1, Content: content}
+	case index == 0:
+		e = Edit{Offset: parent.Offset + 1, Content: content + ","}
+	default:
+		prev := children[min(index, n)-1]
+		e = Edit{Offset: prev.Offset + prev.Length, Content: "," + content}
 	}
 	return withFormatting(text, e, o)
 }

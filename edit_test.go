@@ -228,6 +228,120 @@ func TestModifyIgnoresKeepLines(t *testing.T) {
 	assertModify(t, "{}", Path{"a"}, 1, o, "{\n  \"a\": 1\n}")
 }
 
+// assertRemove applies Remove's edits and checks the text.
+func assertRemove(t *testing.T, in string, path Path, o ModifyOptions, want string) {
+	t.Helper()
+	edits, err := Remove(in, path, o)
+	if err != nil {
+		t.Fatalf("Remove(%q, %v): %v", in, path, err)
+	}
+	got, err := ApplyEdits(in, edits)
+	if err != nil {
+		t.Fatalf("Remove(%q, %v): applying %+v: %v", in, path, edits, err)
+	}
+	if got != want {
+		t.Errorf("Remove(%q, %v):\n got %q\nwant %q", in, path, got, want)
+	}
+}
+
+// Port of upstream's "remove property".
+func TestRemoveProperty(t *testing.T) {
+	o := modifyOpts()
+	assertRemove(t, "{\n  \"x\": \"y\"\n}", Path{"x"}, o, "{\n}")
+	assertRemove(t, "{\n  \"x\": \"y\", \"a\": []\n}", Path{"x"}, o, "{\n  \"a\": []\n}")
+	assertRemove(t, "{\n  \"x\": \"y\", \"a\": []\n}", Path{"a"}, o, "{\n  \"x\": \"y\"\n}")
+}
+
+// Ports of upstream's "set item" and array insertion tests.
+func TestModifyArray(t *testing.T) {
+	o := modifyOpts()
+	in := "{\n  \"x\": [1, 2, 3],\n  \"y\": 0\n}"
+	assertModify(t, in, Path{"x", 0}, 6, o, "{\n  \"x\": [6, 2, 3],\n  \"y\": 0\n}")
+	assertModify(t, in, Path{"x", 1}, 5, o, "{\n  \"x\": [1, 5, 3],\n  \"y\": 0\n}")
+	assertModify(t, in, Path{"x", 2}, 4, o, "{\n  \"x\": [1, 2, 4],\n  \"y\": 0\n}")
+	assertModify(t, in, Path{"x", 3}, 3, o, "{\n  \"x\": [\n    1,\n    2,\n    3,\n    3\n  ],\n  \"y\": 0\n}")
+
+	insert := modifyOpts()
+	insert.IsArrayInsertion = true
+	assertModify(t, "[\n  2,\n  3\n]", Path{0}, 1, insert, "[\n  1,\n  2,\n  3\n]")
+	assertModify(t, "[\n  1,\n  3\n]", Path{1}, 2, insert, "[\n  1,\n  2,\n  3\n]")
+	assertModify(t, "[\n]", Path{0}, 1, o, "[\n  1\n]")
+	assertModify(t, "[\n]", Path{1}, 1, o, "[\n  1\n]")
+	assertModify(t, "[\n  1,\n  2\n]", Path{2}, 3, o, "[\n  1,\n  2,\n  3\n]")
+	assertModify(t, "[\n]", Path{-1}, "bar", o, "[\n  \"bar\"\n]")
+	assertModify(t, "[\n  1,\n  2\n]", Path{-1}, "bar", o, "[\n  1,\n  2,\n  \"bar\"\n]")
+}
+
+// Ports of upstream's array removal tests.
+func TestRemoveArrayElement(t *testing.T) {
+	o := modifyOpts()
+	assertRemove(t, "[\n  1\n]", Path{0}, o, "[]")
+	assertRemove(t, "[\n  1,\n  2,\n  3\n]", Path{1}, o, "[\n  1,\n  3\n]")
+	assertRemove(t, "[\n  1,\n  2,\n  \"bar\"\n]", Path{2}, o, "[\n  1,\n  2\n]")
+	assertRemove(t, "[\n  1,\n  \"foo\",\n  \"bar\",\n]", Path{2}, o, "[\n  1,\n  \"foo\"\n]")
+	assertRemove(t, "// This is a comment\n[\n  1,\n  \"foo\",\n  \"bar\"\n]", Path{2}, o, "// This is a comment\n[\n  1,\n  \"foo\"\n]")
+}
+
+// Port of upstream's "set property without formatting".
+func TestModifyArrayElementFormatting(t *testing.T) {
+	in := "{\n  \"x\": [1, 2, 3],\n  \"y\": 0\n}"
+	value := map[string]any{"a": 1, "b": 2}
+	assertModify(t, in, Path{"x", 0}, value, modifyOpts(), "{\n  \"x\": [{\n      \"a\": 1,\n      \"b\": 2\n    }, 2, 3],\n  \"y\": 0\n}")
+	assertModify(t, in, Path{"x", 0}, value, ModifyOptions{}, "{\n  \"x\": [{\"a\":1,\"b\":2}, 2, 3],\n  \"y\": 0\n}")
+}
+
+// Upstream keeps the last byte here and gives `[12]`.
+func TestRemoveLastOfOneLineArray(t *testing.T) {
+	assertRemove(t, "[1,2]", Path{1}, ModifyOptions{}, "[1]")
+	assertRemove(t, "[1, 2, 3]", Path{2}, ModifyOptions{}, "[1, 2]")
+	assertRemove(t, "[1, 2 ]", Path{1}, ModifyOptions{}, "[1 ]")
+}
+
+// The span removed runs from the previous member, comments and all.
+func TestRemoveDeletesCommentsInSpan(t *testing.T) {
+	assertRemove(t, "{\n  \"a\": 1, // trailing a\n  // about b\n  \"b\": 2\n}", Path{"b"}, modifyOpts(), "{\n  \"a\": 1\n}")
+	assertRemove(t, "[1 /*c*/]", Path{0}, ModifyOptions{}, "[]")
+}
+
+func TestRemoveMissingPropertyIsNoEdit(t *testing.T) {
+	edits, err := Remove(`{"a": 1}`, Path{"b"}, modifyOpts())
+	if err != nil || len(edits) != 0 {
+		t.Errorf("got %+v, %v; want no edits", edits, err)
+	}
+}
+
+func TestRemoveErrors(t *testing.T) {
+	for name, tc := range map[string]struct {
+		in   string
+		path Path
+	}{
+		"empty path":       {`{"a": 1}`, Path{}},
+		"empty document":   {``, Path{"a"}},
+		"missing parent":   {`{"a": 1}`, Path{"x", "y"}},
+		"index past end":   {`[1, 2]`, Path{5}},
+		"index past end 1": {`[1]`, Path{5}},
+		"index -1":         {`[1, 2]`, Path{-1}},
+		"index -1 empty":   {`[]`, Path{-1}},
+		"negative index":   {`[1, 2]`, Path{-2}},
+		"key on an array":  {`[1]`, Path{"a"}},
+		"float element":    {`[1]`, Path{0.5}},
+	} {
+		if edits, err := Remove(tc.in, tc.path, modifyOpts()); err == nil {
+			t.Errorf("%s: want an error, got %+v", name, edits)
+		}
+	}
+}
+
+func TestModifyNegativeIndex(t *testing.T) {
+	for _, in := range []string{`[1, 2]`, `[]`} {
+		o := modifyOpts()
+		o.IsArrayInsertion = true
+		if edits, err := Modify(in, Path{-2}, 1, o); err == nil {
+			t.Errorf("Modify(%q, -2): want an error, got %+v", in, edits)
+		}
+	}
+}
+
 // A property with no value ends before the '}', so the new one lands inside the
 // object; upstream's lands after it.
 func TestModifyDanglingProperty(t *testing.T) {
@@ -293,6 +407,8 @@ type modifyGoldenCase struct {
 	Text    string          `json:"text"`
 	Path    []any           `json:"path"`
 	Value   json.RawMessage `json:"value"`
+	Remove  bool            `json:"remove"`
+	Insert  bool            `json:"arrayInsertion"`
 	Applied string          `json:"applied"`
 	Edits   []Edit          `json:"edits"`
 	Error   bool            `json:"error"`
@@ -330,9 +446,48 @@ var modifyGoldenIndexes = map[string]func(key string) func([]string) int{
 // the '}'; see TestModifyDanglingProperty.
 var modifyGoldenTreeDivergence = map[string]bool{`{"a":}`: true, `{"a" 1}`: true}
 
+// arrayDivergence names the upstream array bug a case hits, if any; we return
+// an error for the first two.
+//   - "range": Remove with an index outside the array, which upstream crashes
+//     on, answers by emptying the array, or turns into an inserted "undefined".
+//   - "negative": Modify with an index below -1, which upstream crashes on
+//     unless the array is empty and IsArrayInsertion is set.
+//   - "merge": Remove of the last element of a one-line array, where upstream
+//     keeps its last byte (`[1,2]` -> `[12]`).
+func arrayDivergence(text string, path Path, remove bool) string {
+	if len(path) == 0 {
+		return ""
+	}
+	index, ok := path[len(path)-1].(int)
+	if !ok {
+		return ""
+	}
+	root, _ := ParseTree(text)
+	parent := FindNodeAtLocation(root, path[:len(path)-1])
+	if parent == nil || parent.Type != NodeArray {
+		return ""
+	}
+	n := len(parent.Children)
+	if !remove {
+		if index < -1 {
+			return "negative"
+		}
+		return ""
+	}
+	if index < 0 || index >= n {
+		return "range"
+	}
+	last := parent.Children[n-1]
+	if n > 1 && index == n-1 && parent.Offset+parent.Length-2 < last.Offset+last.Length {
+		return "merge"
+	}
+	return ""
+}
+
 // TestModifyGoldenCorpus replays node-jsonc-parser's recorded modify() output
 // from testdata/modify-golden.jsonl, the same way TestFormatGoldenCorpus does.
-// It also reads each written value back, which holds for any correct Modify.
+// It also reads each written value back, and checks what's left after each
+// removal; both hold for any correct Modify and Remove.
 func TestModifyGoldenCorpus(t *testing.T) {
 	f, err := os.Open(filepath.Join("testdata", "modify-golden.jsonl"))
 	if err != nil {
@@ -353,6 +508,7 @@ func TestModifyGoldenCorpus(t *testing.T) {
 	}
 
 	failures, n, skipped := 0, 0, 0
+	diverged := map[string]int{}
 	fail := func(line int, c modifyGoldenCase, format string, args ...any) {
 		failures++
 		if failures <= 10 {
@@ -381,13 +537,38 @@ func TestModifyGoldenCorpus(t *testing.T) {
 			}
 			path[i] = seg
 		}
-		value := decodeNumbers(t, c.Value)
+		var value any
+		if !c.Remove {
+			value = decodeNumbers(t, c.Value)
+		}
 		var key string
 		if len(path) > 0 {
 			key, _ = path[len(path)-1].(string)
 		}
 
-		edits, err := Modify(c.Text, path, value, ModifyOptions{Format: format, GetInsertionIndex: index(key)})
+		o := ModifyOptions{Format: format, GetInsertionIndex: index(key), IsArrayInsertion: c.Insert}
+		var edits []Edit
+		if c.Remove {
+			edits, err = Remove(c.Text, path, o)
+		} else {
+			edits, err = Modify(c.Text, path, value, o)
+		}
+		if reason := arrayDivergence(c.Text, path, c.Remove); reason != "" {
+			diverged[reason]++
+			if reason != "merge" {
+				if err == nil {
+					fail(line, c, "want an error, got %+v", edits)
+				}
+				continue
+			}
+			got, err := ApplyEdits(c.Text, edits)
+			if err != nil {
+				fail(line, c, "%+v: %v", edits, err)
+			} else if msg := checkRemoved(c.Text, got, path); msg != "" {
+				fail(line, c, "%s", msg)
+			}
+			continue
+		}
 		if c.Error {
 			if err == nil {
 				fail(line, c, "upstream throws, we returned %+v", edits)
@@ -411,11 +592,15 @@ func TestModifyGoldenCorpus(t *testing.T) {
 			fail(line, c, "\n  got edits  %+v\n  want edits %+v", edits, c.Edits)
 			continue
 		}
-		if _, errs := Parse(c.Text); len(errs) == 0 {
+		if c.Remove {
+			if msg := checkRemoved(c.Text, got, path); msg != "" {
+				fail(line, c, "%s", msg)
+			}
+		} else if at, ok := landingPath(c.Text, path, c.Insert); ok {
 			root, errs := ParseTree(got)
 			var want any
 			_ = json.Unmarshal(c.Value, &want)
-			if n := FindNodeAtLocation(root, path); len(errs) != 0 || n == nil || !reflect.DeepEqual(n.Value(), want) {
+			if n := FindNodeAtLocation(root, at); len(errs) != 0 || n == nil || !reflect.DeepEqual(n.Value(), want) {
 				fail(line, c, "reading the value back from %q failed", got)
 			}
 		}
@@ -429,10 +614,116 @@ func TestModifyGoldenCorpus(t *testing.T) {
 	if failures > 10 {
 		t.Errorf("%d golden cases differ from upstream %s (first 10 shown)", failures, header.Upstream)
 	}
-	if skipped == 0 {
-		t.Error("no case hit modifyGoldenTreeDivergence; drop it if the corpus changed")
+	if skipped == 0 || diverged["range"] == 0 || diverged["merge"] == 0 || diverged["negative"] == 0 {
+		t.Errorf("a divergence no longer shows up in the corpus (skipped %d, %v); drop its handling if so", skipped, diverged)
 	}
-	t.Logf("replayed %d cases from node-jsonc-parser %s, skipped %d", n-skipped, header.Upstream, skipped)
+	t.Logf("replayed %d cases from node-jsonc-parser %s; skipped %d, removal bugs %v", n-skipped, header.Upstream, skipped, diverged)
+}
+
+// landingPath is where Modify puts the value: path, except that an array index
+// of -1 or past the end appends. ok is false when text doesn't parse cleanly
+// or path ends in an index on an array that doesn't exist yet.
+func landingPath(text string, path Path, insert bool) (Path, bool) {
+	root, errs := ParseTree(text)
+	if len(errs) != 0 || len(path) == 0 {
+		return path, len(errs) == 0
+	}
+	index, isIndex := path[len(path)-1].(int)
+	if !isIndex {
+		return path, true
+	}
+	parent := FindNodeAtLocation(root, path[:len(path)-1])
+	if parent == nil || parent.Type != NodeArray {
+		return nil, false
+	}
+	n := len(parent.Children)
+	if index == -1 || index > n || (index == n && !insert) {
+		index = n
+	}
+	return append(path[:len(path)-1:len(path)-1], index), true
+}
+
+// checkRemoved reports what's wrong, if anything, with after as before with
+// the value at path removed. Only checked when before parses cleanly.
+func checkRemoved(before, after string, path Path) string {
+	v, errs := Parse(before)
+	if len(errs) != 0 || hasDuplicateKeys(before) {
+		return ""
+	}
+	got, errs := Parse(after)
+	if len(errs) != 0 {
+		return fmt.Sprintf("result %q doesn't parse: %v", after, errs)
+	}
+	parent := v
+	for _, seg := range path[:len(path)-1] {
+		switch c := parent.(type) {
+		case map[string]any:
+			parent = c[seg.(string)]
+		case []any:
+			parent = c[seg.(int)]
+		}
+	}
+	switch c := parent.(type) {
+	case map[string]any:
+		delete(c, path[len(path)-1].(string))
+	case []any:
+		i := path[len(path)-1].(int)
+		removed := append(c[:i:i], c[i+1:]...)
+		if len(path) == 1 {
+			v = removed
+		} else {
+			setAt(v, path[:len(path)-1], removed)
+		}
+	}
+	if !reflect.DeepEqual(got, v) {
+		return fmt.Sprintf("after removing: got %#v, want %#v", got, v)
+	}
+	return ""
+}
+
+// hasDuplicateKeys reports whether any object in text repeats a key, which
+// makes "the value at path" ambiguous.
+func hasDuplicateKeys(text string) bool {
+	root, _ := ParseTree(text)
+	var walk func(n *Node) bool
+	walk = func(n *Node) bool {
+		seen := map[string]bool{}
+		for _, c := range n.Children {
+			if n.Type == NodeObject && len(c.Children) > 0 {
+				k, _ := c.Children[0].Literal.(string)
+				if seen[k] {
+					return true
+				}
+				seen[k] = true
+			}
+			if walk(c) {
+				return true
+			}
+		}
+		return false
+	}
+	return root != nil && walk(root)
+}
+
+// setAt replaces the value at path inside v, which holds maps and slices.
+func setAt(v any, path Path, value any) {
+	for i, seg := range path {
+		if i == len(path)-1 {
+			switch c := v.(type) {
+			case map[string]any:
+				c[seg.(string)] = value
+			case []any:
+				c[seg.(int)] = value
+			}
+			return
+		}
+		switch c := v.(type) {
+		case map[string]any:
+			v = c[seg.(string)]
+		case []any:
+			v = c[seg.(int)]
+		}
+	}
 }
 
 // decodeNumbers keeps numbers as json.Number, so they marshal back exactly as

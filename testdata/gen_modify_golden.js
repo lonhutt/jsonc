@@ -1,11 +1,9 @@
 // gen_modify_golden.js writes testdata/modify-golden.jsonl: upstream modify()'s
-// output for every case below. TestModifyGoldenCorpus replays it, so Modify
+// output for every case below, removals included (value undefined, recorded
+// as "remove": true). TestModifyGoldenCorpus replays it, so Modify and Remove
 // can't drift from upstream without failing `go test`, and no node is needed.
 //
 // Regenerate it with format-golden.jsonl; see README.md.
-//
-// Paths never end in an array index on an existing array, and nothing is
-// removed; those cases aren't ported yet.
 
 'use strict';
 
@@ -28,6 +26,12 @@ const documents = [
 	'{"a":1,}', '{"a":}', '{"a" 1}', '{"a":1', '{"a":1,"a":2}',
 	// multi-byte
 	'{"é":1}', '{"a":"中文"}',
+	// arrays, including upstream's own shapes
+	'[1,2]', '[1, 2, 3]', '[\n  1,\n  2\n]', '[\n  2,\n  3\n]', '[\n  1,\n  "foo",\n  "bar",\n]',
+	'[]', '[\n]', '[1 /*c*/]', '// head\n[\n  1,\n  "foo",\n  "bar"\n]', '{"a":[1,2]}',
+	'{\n  "x": [1, 2, 3],\n  "y": 0\n}', '[[1],[2,3]]', '[1,2,]', '[1 2]',
+	// comments next to what's removed
+	'{\n  "a": 1, // trailing a\n  // about b\n  "b": 2\n}', '{\n  // about a\n  "a": 1,\n  "b": 2\n}',
 	// whitespace Format rewrites around the splice
 	'\t true', '\t {"a":1}', '{\n  "a": 1\t\n      }', '{\n  "x": {\n    "a": 1 \n        }\n}',
 ];
@@ -35,6 +39,7 @@ const documents = [
 const paths = [
 	[], ['a'], ['b'], ['x'], ['x', 'a'], ['x', 'c'], ['a', 'b'],
 	['new', 'deep'], ['new', 0], ['new', 0, 'k'], ['é'],
+	[0], [1], [2], [5], [-1], [-2], ['a', 0], ['a', 1], ['a', -1], ['x', 0], ['x', 3], [0, 0], [1, 0],
 ];
 
 // Object keys sorted, so a Go map marshals them in the same order.
@@ -66,7 +71,7 @@ function main() {
 	const isASCII = (s) => !/[^\x00-\x7f]/.test(s);
 
 	const cases = [];
-	const add = (text, path, value, optName, o, idxName, idx) => {
+	const add = (text, path, value, optName, o, idxName, idx, isArrayInsertion) => {
 		const key = path[path.length - 1];
 		const options = {};
 		if (o) {
@@ -79,7 +84,10 @@ function main() {
 			};
 		}
 		if (idx) options.getInsertionIndex = (props) => idx(props, key);
-		const c = { opts: optName, index: idxName, text, path, value };
+		if (isArrayInsertion) options.isArrayInsertion = true;
+		const c = { opts: optName, index: idxName, text, path };
+		if (value === undefined) c.remove = true; else c.value = value;
+		if (isArrayInsertion) c.arrayInsertion = true;
 		try {
 			const edits = j.modify(text, path, value, options);
 			c.applied = j.applyEdits(text, edits);
@@ -94,20 +102,29 @@ function main() {
 
 	for (const text of documents) {
 		for (const path of paths) {
-			// every value raw and formatted; the other option sets with two
-			for (const value of values) {
+			// every value raw and formatted on a few paths, two values elsewhere;
+			// the other option sets with one
+			const fullValues = ['[]', '["a"]', '["x","c"]', '["new","deep"]', '[0]', '[-1]'].includes(JSON.stringify(path));
+			for (const value of fullValues ? values : ['bar', values[values.length - 1]]) {
 				for (const [optName, o] of optionSets.slice(0, 2)) {
 					add(text, path, value, optName, o, 'append', null);
 				}
 			}
-			for (const value of ['bar', values[values.length - 1]]) {
-				for (const [optName, o] of optionSets.slice(2)) {
-					add(text, path, value, optName, o, 'append', null);
-				}
+			for (const [optName, o] of optionSets.slice(2)) {
+				add(text, path, values[values.length - 1], optName, o, 'append', null);
 			}
 			// insertion order only matters for where a new key goes
-			for (const [idxName, idx] of insertionIndexes.slice(1)) {
-				add(text, path, 'bar', 'spaces2', optionSets[1][1], idxName, idx);
+			if (typeof path[path.length - 1] === 'string') {
+				for (const [idxName, idx] of insertionIndexes.slice(1)) {
+					add(text, path, 'bar', 'spaces2', optionSets[1][1], idxName, idx);
+				}
+			}
+			if (typeof path[path.length - 1] === 'number') {
+				add(text, path, 'bar', 'spaces2', optionSets[1][1], 'append', null, true);
+				add(text, path, 'bar', 'raw', null, 'append', null, true);
+			}
+			for (const [optName, o] of optionSets.slice(0, 3)) {
+				add(text, path, undefined, optName, o, 'append', null);
 			}
 		}
 	}
