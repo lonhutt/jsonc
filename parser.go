@@ -8,8 +8,7 @@ import (
 	"strconv"
 )
 
-// ParseErrorCode identifies a recoverable problem found while parsing.
-// Codes start at 1; the zero value is never a valid code.
+// ParseErrorCode identifies a recoverable parse problem. Codes start at 1.
 type ParseErrorCode int
 
 const (
@@ -39,12 +38,10 @@ var parseErrorCodeNames = [...]string{
 	"InvalidUnicode", "InvalidEscapeCharacter", "InvalidCharacter",
 }
 
-// Adding a code to the const block above without adding its name here is a
-// compile error: this index is out of range unless the table covers the last
-// code. Without it, String would silently return "ParseErrorCode(17)".
+// Fails to compile if a code is added without a name.
 var _ = parseErrorCodeNames[InvalidCharacter-1]
 
-// String returns the code's name, replacing upstream's printParseErrorCode.
+// String returns the code's name; upstream's printParseErrorCode.
 func (c ParseErrorCode) String() string {
 	i := int(c) - 1
 	if i < 0 || i >= len(parseErrorCodeNames) {
@@ -53,14 +50,12 @@ func (c ParseErrorCode) String() string {
 	return parseErrorCodeNames[i]
 }
 
-// ParseError is a single recoverable parse problem. Parsing continues after
-// one is reported, so callers receive a slice of them alongside a best-effort
-// result. All offsets are byte offsets.
+// ParseError is one recoverable parse problem. Offsets are bytes.
 type ParseError struct {
 	Code           ParseErrorCode
 	Offset, Length int
 	StartLine      int // 0-based
-	StartCol       int // 0-based, bytes from the start of the line
+	StartCol       int // 0-based, in bytes
 }
 
 func (e ParseError) Error() string {
@@ -74,7 +69,7 @@ type parseConfig struct {
 	useNumber          bool
 }
 
-// ParseOption configures parsing. Construct one with the functions below.
+// ParseOption configures parsing.
 type ParseOption func(*parseConfig)
 
 // DisallowComments reports a comment as InvalidCommentToken instead of
@@ -94,8 +89,8 @@ func AllowEmptyContent() ParseOption {
 	return func(c *parseConfig) { c.allowEmptyContent = true }
 }
 
-// UseNumber decodes numeric literals as json.Number rather than float64,
-// preserving exact large integers and decimals.
+// UseNumber decodes numbers as json.Number instead of float64, so large
+// integers and decimals stay exact.
 func UseNumber() ParseOption {
 	return func(c *parseConfig) { c.useNumber = true }
 }
@@ -108,23 +103,18 @@ func newParseConfig(opts []ParseOption) parseConfig {
 	return c
 }
 
-// Span locates a visitor event in the source text. All values are byte based.
+// Span locates a visitor event in the text. Offsets are bytes.
 type Span struct {
 	Offset, Length int
 	StartLine      int // 0-based
-	StartCol       int // 0-based, bytes from the start of the line
-	// Path returns the JSON path of the event's position. It is never nil.
-	// The path is snapshotted when the Span is created, not read from the live
-	// parser stack when called, so it stays correct however long a caller holds
-	// on to the Span.
-	//
-	// Every call returns the same slice, so the caller must not modify it;
-	// copy it first if you need to retain a mutable path.
+	StartCol       int // 0-based, in bytes
+	// Path returns the JSON path at the event; never nil. It's a snapshot, so
+	// it stays right however long the Span is held. Every call returns the same
+	// slice; copy it before modifying.
 	Path func() Path
 }
 
-// Visitor holds the callbacks Visit invokes. Every field is optional; set only
-// the ones you need.
+// Visitor holds Visit's callbacks; all optional.
 type Visitor struct {
 	OnObjectBegin    func(Span)
 	OnObjectEnd      func(Span)
@@ -141,17 +131,12 @@ type visitState struct {
 	s   *Scanner
 	v   Visitor
 	cfg parseConfig
-	// path is the live JSON path stack. Object property names and array
-	// indices are written in place as parsing advances.
+	// path is live; keys and indices are overwritten in place as parsing moves.
 	path Path
 }
 
-// Visit parses text and invokes v's callbacks for each object, array, literal,
-// separator, and comment. It reports every recoverable error through
-// v.OnError and keeps going.
-//
-// It returns false only when parsing could not produce a value at all; parse
-// errors alone do not make it return false.
+// Visit parses text, calling v's callbacks as it goes. Errors go to v.OnError
+// and parsing continues; it returns false only when there's no value at all.
 func Visit(text string, v Visitor, opts ...ParseOption) bool {
 	st := &visitState{
 		s:   NewScanner(text),
@@ -177,9 +162,8 @@ func Visit(text string, v Visitor, opts ...ParseOption) bool {
 	return true
 }
 
-// span builds a Span for the scanner's current token.
 func (st *visitState) span() Span {
-	// Copy the path stack now; the closure must not observe later mutations.
+	// copy now; the closure mustn't see later changes to the live path
 	snapshot := make(Path, len(st.path))
 	copy(snapshot, st.path)
 	return Span{
@@ -191,8 +175,8 @@ func (st *visitState) span() Span {
 	}
 }
 
-// scanNext advances past trivia, translating scan errors into parse errors and
-// dispatching comments, and returns the next significant token.
+// scanNext returns the next significant token, reporting scan errors and
+// comments it passes.
 func (st *visitState) scanNext() SyntaxKind {
 	for {
 		token := st.s.Scan()
@@ -222,20 +206,17 @@ func (st *visitState) scanNext() SyntaxKind {
 		case Unknown:
 			st.handleError(InvalidSymbol, nil, nil)
 		case Trivia, LineBreak:
-			// skip
 		default:
 			return token
 		}
 	}
 }
 
-// handleError reports code, then skips tokens to resynchronize. It stops after
-// a token in skipUntilAfter (consuming it), or before a token in skipUntil.
+// handleError reports code, then skips until it has consumed a token in
+// skipUntilAfter or reached one in skipUntil.
 //
-// skipUntilAfter exists for parity with upstream's visit. Both call sites that
-// pass it (the CloseBraceExpected and CloseBracketExpected reports) sit after
-// their container loop has already run to EOF, so in practice the skip loop
-// never runs and the parameter never actually consumes a token.
+// skipUntilAfter is only for parity with upstream; both callers are already at
+// EOF, so it never consumes anything.
 func (st *visitState) handleError(code ParseErrorCode, skipUntilAfter, skipUntil []SyntaxKind) {
 	if st.v.OnError != nil {
 		st.v.OnError(code, st.span())
@@ -263,8 +244,8 @@ func (st *visitState) parseValue() bool {
 	case OpenBrace:
 		return st.parseObject()
 	case StringLiteral:
-		// Identical to default on purpose: upstream calls parseString(true)
-		// here, and keeping the arm keeps this function diffable against it.
+		// same as default; kept so this diffs cleanly against upstream's
+		// parseString(true)
 		return st.parseLiteral()
 	default:
 		return st.parseLiteral()
@@ -278,11 +259,9 @@ func (st *visitState) parseLiteral() bool {
 		var value any
 		if st.cfg.useNumber {
 			value = json.Number(raw)
-			// Only a SYNTAX error invalidates a json.Number. A value out of
-			// float64's range is still a perfectly good sequence of digits,
-			// and preserving those digits is the entire reason UseNumber
-			// exists — clobbering 1e400 to "0" would defeat it. This matches
-			// encoding/json, whose UseNumber decoder accepts 1e400 verbatim.
+			// Only a syntax error invalidates a json.Number. 1e400 overflows
+			// float64 but the digits are still exact, which is the point of
+			// UseNumber; encoding/json keeps it too.
 			if _, err := strconv.ParseFloat(raw, 64); err != nil {
 				var ne *strconv.NumError
 				if !errors.As(err, &ne) || ne.Err != strconv.ErrRange {
@@ -336,7 +315,7 @@ func (st *visitState) parseProperty() bool {
 		return false
 	}
 	name := st.s.Value()
-	// Write the name into the live path before descending into the value.
+	// before the value, so its events see this key
 	st.path[len(st.path)-1] = name
 	if st.v.OnObjectProperty != nil {
 		st.v.OnObjectProperty(name, st.span())
@@ -359,7 +338,7 @@ func (st *visitState) parseObject() bool {
 	if st.v.OnObjectBegin != nil {
 		st.v.OnObjectBegin(st.span())
 	}
-	// Push a placeholder; parseProperty overwrites it with each key.
+	// placeholder; parseProperty fills in each key
 	st.path = append(st.path, nil)
 	st.scanNext()
 
@@ -419,7 +398,6 @@ func (st *visitState) parseArray() bool {
 		if !st.parseValue() {
 			st.handleError(ValueExpected, nil, []SyntaxKind{CloseBracket, Comma})
 		}
-		// Advance the array index in the live path.
 		if i, ok := st.path[len(st.path)-1].(int); ok {
 			st.path[len(st.path)-1] = i + 1
 		}
@@ -438,27 +416,23 @@ func (st *visitState) parseArray() bool {
 	return true
 }
 
-// Parse parses text and returns the value it represents, using the same Go
-// types as json.Unmarshal into an any: map[string]any, []any, string, bool,
-// float64 (or json.Number with UseNumber), and nil.
+// Parse returns the value of text as json.Unmarshal into an any would:
+// map[string]any, []any, string, bool, float64 (json.Number with UseNumber),
+// or nil.
 //
-// Parsing is fault tolerant. A best-effort value is always returned alongside
-// every recoverable problem found; callers wanting strictness check that the
-// error slice is empty. Object key order is not preserved — use ParseTree when
-// order matters.
+// It's fault tolerant; a best-effort value comes back with every problem
+// found, so check len(errs) == 0 to be strict. Key order isn't kept; use
+// ParseTree for that.
 func Parse(text string, opts ...ParseOption) (any, []ParseError) {
 	var (
-		errs   []ParseError
-		result any
-		// stack holds the containers currently open. Each entry is either a
-		// *[]any or a map[string]any.
-		stack   []any
+		errs    []ParseError
+		result  any
+		stack   []any // open containers: *[]any or map[string]any
 		keys    []string
 		hasRoot bool
 	)
 
-	// set stores a completed value into the enclosing container, or into
-	// result when there is no enclosing container.
+	// set stores v in the open container, or as the result at the top level.
 	set := func(v any) {
 		if len(stack) == 0 {
 			result = v

@@ -12,8 +12,8 @@ import (
 	"testing"
 )
 
-// applyEditsForTest runs every format test's edits through the real
-// ApplyEdits, so an overlapping or out-of-bounds edit from Format fails there.
+// applyEditsForTest goes through the real ApplyEdits, so an overlapping or
+// out-of-bounds edit from Format fails.
 func applyEditsForTest(text string, edits []Edit) (string, error) {
 	return ApplyEdits(text, edits)
 }
@@ -26,12 +26,12 @@ func tabs4() FormatOptions {
 	return FormatOptions{TabSize: 4, InsertSpaces: false, EOL: "\n"}
 }
 
-// detect2 leaves EOL empty so the terminator is taken from the document.
+// detect2 leaves EOL empty, so it comes from the document.
 func detect2() FormatOptions {
 	return FormatOptions{TabSize: 2, InsertSpaces: true}
 }
 
-// editsEqual compares edit lists, treating a nil and an empty list as equal.
+// editsEqual treats nil and empty as equal.
 func editsEqual(a, b []Edit) bool {
 	if len(a) != len(b) {
 		return false
@@ -48,11 +48,9 @@ func isAllWhitespace(s string) bool {
 	return strings.TrimLeft(s, " \t\r\n\v\f") == ""
 }
 
-// tokenSignature is the sequence of non-trivia tokens in text, each as its kind
-// plus its exact source slice. Format is a whitespace-only rewriter, so this
-// must be identical before and after formatting: any change means a token was
-// destroyed, created, or merged with its neighbour -- a line comment that
-// swallowed the next token, a deleted comment, or `1 2` collapsed into `12`.
+// tokenSignature is each non-trivia token's kind and source text. Format only
+// touches whitespace, so this can't change; if it does, a token was lost, added
+// or merged (a line comment swallowing the next token, or `1 2` becoming `12`).
 func tokenSignature(text string) []string {
 	var out []string
 	s := NewScanner(text)
@@ -66,19 +64,16 @@ func tokenSignature(text string) []string {
 		}
 		src := text[s.Offset() : s.Offset()+s.Length()]
 		if s.TokenError() == ScanUnexpectedEndOfComment {
-			// An unterminated block comment runs to EOF, so the gap after it
-			// is inside it: InsertFinalNewline and KeepLines write there, as
-			// upstream does. Only its trailing whitespace may change.
+			// An unterminated block comment runs to EOF, so the final newline lands
+			// inside it, as upstream; only its trailing whitespace may change.
 			src = strings.TrimRight(src, " \t\r\n\v\f")
 		}
 		out = append(out, k.String()+":"+src)
 	}
 }
 
-// checkEditInvariants asserts the properties that make Format safe to apply to
-// a live document, independent of what the edits happen to say:
-// edits are ordered and non-overlapping, and every edit replaces whitespace
-// with whitespace.
+// checkEditInvariants: edits are ordered, don't overlap, and replace
+// whitespace with whitespace.
 func checkEditInvariants(t *testing.T, in string, edits []Edit) {
 	t.Helper()
 	prevEnd := -1
@@ -104,9 +99,8 @@ func checkEditInvariants(t *testing.T, in string, edits []Edit) {
 	}
 }
 
-// assertFormat formats text, applies the edits, and checks the result -- plus
-// the invariants that hold for every whole-document format: minimal edits,
-// whitespace-only edits, token preservation, and idempotence.
+// assertFormat checks the result, plus minimal whitespace-only edits, token
+// preservation and idempotence.
 func assertFormat(t *testing.T, in, want string, o FormatOptions) {
 	t.Helper()
 	edits := Format(in, nil, o)
@@ -129,8 +123,7 @@ func assertFormat(t *testing.T, in, want string, o FormatOptions) {
 
 // --- whole-document formatting -------------------------------------------
 //
-// Every expectation below was produced by running the real
-// node-jsonc-parser 3.3.1 format() over the same input and options.
+// Expected strings come from node-jsonc-parser 3.3.1.
 
 func TestFormatObject(t *testing.T) {
 	assertFormat(t, `{"a":1}`, "{\n  \"a\": 1\n}", spaces2())
@@ -153,9 +146,8 @@ func TestFormatArray(t *testing.T) {
 	assertFormat(t, "{\"a\":[\n1,\n2]}", "{\n  \"a\": [\n    1,\n    2\n  ]\n}", spaces2())
 }
 
-// TestFormatIndentLevelDecrements guards the nesting counter in both
-// directions. An indentLevel that increments but never decrements, or one that
-// decrements even when closing an empty container, gets these wrong.
+// Guards the nesting counter both ways; never decrementing, or decrementing
+// on an empty container, gets these wrong.
 func TestFormatIndentLevelDecrements(t *testing.T) {
 	assertFormat(t, `{"a":{"b":{}}}`, "{\n  \"a\": {\n    \"b\": {}\n  }\n}", spaces2())
 	assertFormat(t, `[[[]]]`, "[\n  [\n    []\n  ]\n]", spaces2())
@@ -176,8 +168,8 @@ func TestFormatDegenerateDocuments(t *testing.T) {
 	assertFormat(t, `   `, `   `, spaces2())
 	assertFormat(t, `1`, `1`, spaces2())
 	assertFormat(t, `}`, `}`, spaces2())
-	// Three closers with nothing open drive indentLevel negative; the indent
-	// string for a negative level is empty, not a panic.
+	// three closers with nothing open push indentLevel negative; that's an empty
+	// indent, not a panic
 	assertFormat(t, `]]]`, "]\n]\n]", spaces2())
 }
 
@@ -187,7 +179,6 @@ func TestFormatTabs(t *testing.T) {
 }
 
 func TestFormatDefaultsTabSize(t *testing.T) {
-	// TabSize 0 falls back to 4.
 	o := FormatOptions{InsertSpaces: true, EOL: "\n"}
 	assertFormat(t, `{"a":1}`, "{\n    \"a\": 1\n}", o)
 }
@@ -200,7 +191,7 @@ func TestDefaultFormatOptions(t *testing.T) {
 }
 
 func TestFormatMultibyteText(t *testing.T) {
-	// Offsets are bytes, not runes: a multi-byte key must not shift an edit.
+	// offsets are bytes; a multi-byte key mustn't shift an edit
 	assertFormat(t, "{\"é中\":1}", "{\n  \"é中\": 1\n}", spaces2())
 	assertFormat(t, "{\"a\":\"😀\"}", "{\n  \"a\": \"😀\"\n}", spaces2())
 	assertFormat(t, "{\"a\":\"ü\",\"b\":\"漢字\"}", "{\n  \"a\": \"ü\",\n  \"b\": \"漢字\"\n}", spaces2())
@@ -222,31 +213,27 @@ func TestFormatEmitsNoEditsWhenAlreadyFormatted(t *testing.T) {
 			t.Errorf("already-formatted input %q produced %d edits, want 0: %+v", in, len(edits), edits)
 		}
 	}
-	// Same, for a CRLF document with EOL detection.
+	// same, for CRLF with detection
 	if edits := Format("{\r\n  \"a\": 1\r\n}", nil, detect2()); len(edits) != 0 {
 		t.Errorf("already-formatted CRLF input produced %d edits, want 0: %+v", len(edits), edits)
 	}
 }
 
-// TestFormatEditsOnlyTheGapsThatDiffer pins the exact edit list. A formatter
-// that rewrote every gap -- or replaced the whole document -- would still
-// produce the right text, so only this test can see the difference.
+// Pins the exact edit list; rewriting every gap, or the whole document,
+// would still give the right text.
 func TestFormatEditsOnlyTheGapsThatDiffer(t *testing.T) {
 	tests := []struct {
 		in   string
 		want []Edit
 	}{
-		// One bad gap in an otherwise formatted document: one edit.
 		{"{\n  \"a\":1\n}", []Edit{{Offset: 8, Length: 0, Content: " "}}},
-		// Nothing but a missing space after the colon on the second line.
 		{"{\n  \"a\": 1,\n  \"b\":2\n}", []Edit{{Offset: 18, Length: 0, Content: " "}}},
-		// Every gap wrong: exactly three, no more.
+		// every gap wrong: exactly three edits
 		{`{"a":1}`, []Edit{
 			{Offset: 1, Length: 0, Content: "\n  "},
 			{Offset: 5, Length: 0, Content: " "},
 			{Offset: 6, Length: 0, Content: "\n"},
 		}},
-		// Only the trailing whitespace is wrong.
 		{"{\n  \"a\": 1\n}\n\n ", []Edit{{Offset: 12, Length: 3, Content: ""}}},
 	}
 	for _, tc := range tests {
@@ -259,29 +246,28 @@ func TestFormatEditsOnlyTheGapsThatDiffer(t *testing.T) {
 
 // --- comments -------------------------------------------------------------
 
-// TestFormatLineCommentKeepsItsNewline is the data-loss guard. In each case the
-// gap after a line comment must stay a line break; collapsing it to a space
-// would comment out everything that follows on the rewritten line.
+// The data-loss guard: the gap after a line comment has to stay a line
+// break, or whatever follows gets commented out.
 func TestFormatLineCommentKeepsItsNewline(t *testing.T) {
 	tests := []struct{ in, want string }{
-		// After a colon: the value would be swallowed.
+		// after a colon
 		{"{\"a\": // c\n1}", "{\n  \"a\": // c\n  1\n}"},
-		// After a key: the colon and value would be swallowed.
+		// after a key
 		{"{\"a\" // c\n: 1}", "{\n  \"a\" // c\n  : 1\n}"},
-		// After a value: the comma and the next element would be swallowed.
+		// after a value
 		{"[1 // c\n, 2]", "[\n  1 // c\n  ,\n  2\n]"},
-		// After a comma: the next member would be swallowed.
+		// after a comma
 		{"{\"a\":1,// c\n\"b\":2}", "{\n  \"a\": 1, // c\n  \"b\": 2\n}"},
-		// After an opening brace.
+		// after an opening brace
 		{"{// c\n\"a\":1}", "{ // c\n  \"a\": 1\n}"},
-		// Two line comments in a row: the second must not be folded onto the first.
+		// two in a row; the second isn't folded onto the first
 		{"{// a\n// b\n\"x\":1}", "{ // a\n  // b\n  \"x\": 1\n}"},
 		{"{\"a\"://c\n//d\n1}", "{\n  \"a\": //c\n  //d\n  1\n}"},
-		// A line comment as the last thing before a closer.
+		// last thing before a closer
 		{"{\"a\":1 // c\n}", "{\n  \"a\": 1 // c\n}"},
 		{"{\"a\":{\"b\":1 // c\n}}", "{\n  \"a\": {\n    \"b\": 1 // c\n  }\n}"},
 		{"[1,\n// c\n]", "[\n  1,\n  // c\n]"},
-		// A line comment ending in CRLF keeps the CRLF.
+		// CRLF stays CRLF
 		{"{\"a\":1 // c\r\n}", "{\r\n  \"a\": 1 // c\r\n}"},
 	}
 	for _, tc := range tests {
@@ -295,10 +281,9 @@ func TestFormatLineCommentKeepsItsNewline(t *testing.T) {
 	}
 }
 
-// assertNothingFollowsALineComment checks property 2 structurally, without
-// reference to any expected string: in the formatted text, the token after a
-// line comment must start on a later line. If it does not, the formatter has
-// commented it out.
+// assertNothingFollowsALineComment checks without an expected string: the
+// token after a line comment has to start on a later line, or it's been
+// commented out.
 func assertNothingFollowsALineComment(t *testing.T, in, formatted string) {
 	t.Helper()
 	s := NewScanner(formatted)
@@ -322,19 +307,18 @@ func assertNothingFollowsALineComment(t *testing.T, in, formatted string) {
 
 func TestFormatBlockComments(t *testing.T) {
 	tests := []struct{ in, want string }{
-		// A block comment on the same line as a value stays on that line,
-		// separated by exactly one space.
+		// same line as a value: stays there, one space
 		{`{"a":1/* c */}`, "{\n  \"a\": 1 /* c */\n}"},
 		{`{"a":1   /* c */}`, "{\n  \"a\": 1 /* c */\n}"},
-		// On its own line it stays on its own line, re-indented.
+		// own line: stays there, re-indented
 		{"{\"a\":1\n/* c */}", "{\n  \"a\": 1\n  /* c */\n}"},
 		{"{\n/* c */\n\"a\":1}", "{\n  /* c */\n  \"a\": 1\n}"},
 		{"{\n/* c */ \"a\":1}", "{\n  /* c */ \"a\": 1\n}"},
-		// A block comment is not a value: an empty object stays empty.
+		// a block comment isn't a value; an empty object stays empty
 		{`{ /* c */ }`, "{ /* c */}"},
-		// Two block comments in a row are separated.
+		// two in a row get separated
 		{`[/*a*//*b*/]`, "[ /*a*/ /*b*/]"},
-		// A multi-line block comment's own line breaks are left alone.
+		// a multi-line block comment's own breaks are left alone
 		{"{\"a\":/* x\ny */1}", "{\n  \"a\": /* x\ny */ 1\n}"},
 		{"{\"a\":[1,// one\n2],\"b\":{/*x*/\"c\":true}}",
 			"{\n  \"a\": [\n    1, // one\n    2\n  ],\n  \"b\": { /*x*/\n    \"c\": true\n  }\n}"},
@@ -352,10 +336,8 @@ func TestFormatCommentOnlyDocument(t *testing.T) {
 
 // --- malformed input ------------------------------------------------------
 
-// TestFormatMalformedInputIsNotCorrupted covers the cases where upstream sets
-// its hasError flag and suppresses the edit. Without that suppression the
-// whitespace between two adjacent values is deleted and `[1 2]` silently
-// becomes `[12]` -- a different number.
+// Where upstream sets hasError and skips the edit. Without that, `[1 2]`
+// becomes `[12]`; a different number.
 func TestFormatMalformedInputIsNotCorrupted(t *testing.T) {
 	tests := []struct {
 		in, want string
@@ -363,8 +345,8 @@ func TestFormatMalformedInputIsNotCorrupted(t *testing.T) {
 		{`[1 2]`, "[\n  1 2\n]"},
 		{`[true false]`, "[\n  true false\n]"},
 		{`{"a":@}`, "{\n  \"a\":@\n}"},
-		// An unrecognized token is not a value either: the space after it
-		// stays, or `@ 1` would be glued into one token.
+		// an unknown token isn't a value either; the space stays or `@ 1` becomes
+		// one token
 		{`[@ 1]`, "[@ 1\n]"},
 		{`{"a":@ 1}`, "{\n  \"a\":@ 1\n}"},
 		{`[@,1]`, "[@,\n  1\n]"},
@@ -380,22 +362,18 @@ func TestFormatMalformedInputIsNotCorrupted(t *testing.T) {
 // --- EOL ------------------------------------------------------------------
 
 func TestFormatEOLDetection(t *testing.T) {
-	// Empty EOL means: detect from the document.
 	assertFormat(t, "{\r\n\"a\":1}", "{\r\n  \"a\": 1\r\n}", detect2())
-	// A lone CR document stays a lone CR document.
 	assertFormat(t, "{\r\"a\":1}", "{\r  \"a\": 1\r}", detect2())
-	// With no terminator in the document at all, fall back to the option.
+	// no terminator in the document: the option
 	assertFormat(t, `{"a":1}`, "{\n  \"a\": 1\n}", detect2())
 	assertFormat(t, `{"a":1}`, "{\r\n  \"a\": 1\r\n}", FormatOptions{TabSize: 2, InsertSpaces: true, EOL: "\r\n"})
-	// ...and with neither option nor terminator, \n.
+	// ..neither: \n
 	assertFormat(t, `{"a":1}`, "{\n  \"a\": 1\n}", FormatOptions{TabSize: 2, InsertSpaces: true})
 	assertFormat(t, "{\r\n// c\r\n\"a\":1\r\n}", "{\r\n  // c\r\n  \"a\": 1\r\n}", detect2())
 }
 
-// TestFormatDocumentEOLWinsOverOption pins upstream's precedence: the
-// terminator already in the document wins, and the EOL option is only a
-// fallback for a document that has none. Formatting a CRLF file with EOL "\n"
-// must not rewrite it to LF.
+// The document's terminator wins over the EOL option, as upstream; a CRLF
+// file formatted with EOL "\n" stays CRLF.
 func TestFormatDocumentEOLWinsOverOption(t *testing.T) {
 	assertFormat(t, "{\r\n\"a\":1}", "{\r\n  \"a\": 1\r\n}", spaces2())
 	assertFormat(t, "{\r\"a\":1}", "{\r  \"a\": 1\r}", spaces2())
@@ -410,12 +388,12 @@ func TestFormatRange(t *testing.T) {
 		r    Range
 		o    FormatOptions
 		want string
-		// edits, where they are worth pinning exactly.
+		// edits, where they're worth pinning exactly
 		edits []Edit
 	}{
 		{
-			// The initial indent comes from the text before the range, so the
-			// nested object indents to 4, not to 2.
+			// the starting indent comes from the text before the range, so the nested
+			// object indents to 4, not 2
 			name: "nested block keeps its depth",
 			in:   "{\n  \"a\": {\"b\":1}\n}",
 			r:    Range{Offset: 9, Length: 7},
@@ -439,7 +417,7 @@ func TestFormatRange(t *testing.T) {
 			},
 		},
 		{
-			// The initial indent is a tab, counted as TabSize columns.
+			// the starting indent is a tab, counted as TabSize columns
 			name: "tab indentation before the range",
 			in:   "{\n\t\"a\": {\"b\":1}\n}",
 			r:    Range{Offset: 7, Length: 7},
@@ -451,9 +429,8 @@ func TestFormatRange(t *testing.T) {
 			},
 		},
 		{
-			// The leading whitespace of the range's first line is rewritten to
-			// the initial indent it implies -- three spaces at TabSize 2 is
-			// level 1, which is two spaces.
+			// the first line's leading whitespace becomes the indent it implies; three
+			// spaces at TabSize 2 is level 1, two spaces
 			name:  "leading indentation is normalized",
 			in:    "{\n   \"a\":1\n}",
 			r:     Range{Offset: 2, Length: 8},
@@ -494,7 +471,7 @@ func TestFormatRange(t *testing.T) {
 			edits: []Edit{},
 		},
 		{
-			// An insertion exactly at a range boundary is outside the range.
+			// an insertion right at a range boundary is outside it
 			name:  "insertions at the boundary are excluded",
 			in:    `[1,2,3]`,
 			r:     Range{Offset: 2, Length: 3},
@@ -535,8 +512,8 @@ func TestFormatRange(t *testing.T) {
 			edits: []Edit{},
 		},
 		{
-			// The edit that trims trailing whitespace must stop at the end of
-			// the range's last line, not run to the end of the document.
+			// trimming trailing whitespace stops at the end of the range's last line,
+			// not the document
 			name: "trailing text after the range survives",
 			in:   "{\"a\":1}  \nTAIL",
 			r:    Range{Offset: 0, Length: 9},
@@ -589,11 +566,9 @@ func TestFormatRange(t *testing.T) {
 	}
 }
 
-// TestFormatRangeEditsOverlapTheRange is the structural version of the range
-// tests. An edit may cover the whole whitespace gap it belongs to, so it can
-// reach a little past the requested range -- but every edit must overlap the
-// range, and (via checkEditInvariants) every byte it touches is whitespace.
-// A formatter that ignored the range would fail this for most offsets.
+// An edit covers its whole gap, so it can reach a little past the range, but
+// it has to overlap it. A formatter ignoring the range fails this for most
+// offsets.
 func TestFormatRangeEditsOverlapTheRange(t *testing.T) {
 	in := "{\n  \"a\":1,\n  \"b\"  :2,\n  \"c\":3\n}"
 	for off := 0; off <= len(in); off++ {
@@ -617,12 +592,9 @@ func TestFormatRangeEditsOverlapTheRange(t *testing.T) {
 	}
 }
 
-// TestFormatNilRangeIsNotTheWholeDocumentRange pins an asymmetry that a caller
-// would reasonably assume away. The nil form formats from indent level 0; the
-// range form reads its initial indent from the leading whitespace of the
-// range's first line, so a document that starts indented comes back one level
-// deeper. Both outputs below are node-jsonc-parser's. The split is upstream's
-// own `if (range)` branch, so this is deliberate, not incidental.
+// The nil form starts at indent 0; the range form takes the first line's
+// indent, so an indented document comes back a level deeper. Both outputs are
+// upstream's; its own `if (range)` branch does this.
 func TestFormatNilRangeIsNotTheWholeDocumentRange(t *testing.T) {
 	in := `     {"a":1}`
 
@@ -651,8 +623,7 @@ func TestFormatRangeOutOfBoundsDoesNotPanic(t *testing.T) {
 		{Offset: 3, Length: 1000},
 		{Offset: -10, Length: 1000},
 		{Offset: len(in), Length: 0},
-		// Length that overflows when added to Offset: clamping the wrapped
-		// sum would collapse the range and silently return no edits.
+		// Offset+Length overflows; clamping the sum would collapse the range
 		{Offset: 0, Length: math.MaxInt},
 		{Offset: 3, Length: math.MaxInt},
 		{Offset: math.MaxInt, Length: math.MaxInt},
@@ -667,10 +638,8 @@ func TestFormatRangeOutOfBoundsDoesNotPanic(t *testing.T) {
 		}
 	}
 
-	// A length that runs past the end means "to the end" -- including when
-	// Offset+Length overflows, which it does for any non-zero offset with
-	// MaxInt. Clamping the wrapped sum instead of the length turns that into a
-	// silent empty range and zero edits, so check from several offsets.
+	// Past the end means to the end, even when Offset+Length overflows (any
+	// non-zero offset with MaxInt); so check from several offsets.
 	for _, off := range []int{0, 1, 3, len(in)} {
 		want := Format(in, &Range{Offset: off, Length: len(in) - off}, spaces2())
 		for _, length := range []int{len(in) + 50, math.MaxInt} {
@@ -682,11 +651,9 @@ func TestFormatRangeOutOfBoundsDoesNotPanic(t *testing.T) {
 	}
 }
 
-// TestFormatEditsAreStructurallyValid checks what an applier needs, over
-// documents and ranges chosen to be hostile rather than realistic. Task 12's
-// ApplyEdits rejects overlapping edits, and the golden corpus only compares
-// applied TEXT -- so an overlapping pair that happened to apply correctly here
-// would pass every other test in this file and fail in Task 12.
+// TestFormatEditsAreStructurallyValid checks what an applier needs, on
+// hostile inputs. The golden corpus only compares applied text, so an
+// overlapping pair that happened to apply right would pass everything else.
 func TestFormatEditsAreStructurallyValid(t *testing.T) {
 	deep := func(open, close string, n int) string {
 		return strings.Repeat(open, n) + strings.Repeat(close, n)
@@ -789,7 +756,7 @@ func itoa(i int) string { return strconv.Itoa(i) }
 
 // --- KeepLines and InsertFinalNewline ---------------------------------------
 
-// Expected strings below come from node-jsonc-parser 3.3.1, not from reasoning.
+// Expected strings come from node-jsonc-parser 3.3.1.
 
 func keepLines2() FormatOptions {
 	o := spaces2()
@@ -799,9 +766,9 @@ func keepLines2() FormatOptions {
 
 func TestFormatKeepLines(t *testing.T) {
 	o := keepLines2()
-	// One-line layout stays on one line; only indentation is normalized.
+	// one-line layout stays on one line; only indentation changes
 	assertFormat(t, "{\n    \"a\": 1, \"b\": 2\n}", "{\n  \"a\": 1, \"b\": 2\n}", o)
-	// Tokens sharing a line are separated by a space, braces included.
+	// tokens on one line get a space, inside braces too
 	assertFormat(t, `{"a":1, "b":2}`, `{ "a": 1, "b": 2 }`, o)
 	assertFormat(t, `{}`, `{ }`, o)
 	assertFormat(t, `[]`, `[ ]`, o)
@@ -810,19 +777,18 @@ func TestFormatKeepLines(t *testing.T) {
 
 func TestFormatKeepLinesBlankLines(t *testing.T) {
 	o := keepLines2()
-	// Blank lines are kept, every one of them: upstream does not cap the run.
+	// every blank line is kept; upstream doesn't cap the run
 	assertFormat(t, "{\n\"a\": 1,\n\n\"b\": 2\n}", "{\n  \"a\": 1,\n\n  \"b\": 2\n}", o)
 	assertFormat(t, "{\n\"a\": 1,\n\n\n\n\"b\": 2\n}", "{\n  \"a\": 1,\n\n\n\n  \"b\": 2\n}", o)
-	// Our scanner emits ONE LineBreak token per run of terminators; the count
-	// has to come from inside it, with CRLF as one terminator.
+	// our scanner gives a run of breaks one token, so the count comes from
+	// inside it; CRLF is one
 	assertFormat(t, "{\r\n\r\n\"a\":1}", "{\r\n\r\n  \"a\": 1 }", o)
 	assertFormat(t, "{\r\"a\":1\r\r}", "{\r  \"a\": 1\r\r}", o)
-	// Whitespace between breaks does not merge them.
+	// whitespace between breaks doesn't merge them
 	assertFormat(t, "{\n  \n\"a\":1}", "{\n\n  \"a\": 1 }", o)
-	// Breaks the default mode would remove are kept, re-indented.
+	// breaks the default mode drops are kept, re-indented
 	assertFormat(t, "{\"a\":\n\n1}", "{ \"a\":\n\n  1 }", o)
 	assertFormat(t, "[1\n,2]", "[ 1\n  , 2 ]", o)
-	// Trailing breaks are kept too.
 	assertFormat(t, "{\"a\":1}\n\n\n", "{ \"a\": 1 }\n\n\n", o)
 }
 
@@ -837,26 +803,25 @@ func TestCountLineBreaks(t *testing.T) {
 	}
 }
 
-// Upstream emits the leading breaks as an insertion at offset 0 plus a
-// deletion of the gap. We emit one edit over the gap instead, which is
-// minimal and gives the same text. See the comment in formatter.run.
+// Upstream emits leading breaks as an insert at 0 plus a delete of the gap;
+// we emit one edit over the gap, same text.
 func TestFormatKeepLinesLeadingBreaks(t *testing.T) {
 	o := keepLines2()
 	assertFormat(t, "\n\n  {\"a\":1}", "\n\n{ \"a\": 1 }", o)
 	if got, want := Format("\n\n  {}", nil, o), []Edit{{Offset: 0, Length: 4, Content: "\n\n"}, {Offset: 5, Length: 0, Content: " "}}; !editsEqual(got, want) {
 		t.Errorf("leading edits:\n got %+v\nwant %+v", got, want)
 	}
-	// Already formatted: no edits at all (upstream emits a no-op pair).
+	// already formatted: no edits (upstream emits a no-op pair)
 	if got := Format("\n\n{\n  \"a\": 1\n}", nil, o); len(got) != 0 {
 		t.Errorf("already formatted, got edits %+v", got)
 	}
-	// No tokens: left alone (upstream inserts the breaks again on every pass).
+	// no tokens: left alone (upstream adds the breaks again every pass)
 	for _, in := range []string{"\n\n", "  \n\n  "} {
 		if got := Format(in, nil, o); len(got) != 0 {
 			t.Errorf("Format(%q) = %+v, want no edits", in, got)
 		}
 	}
-	// A range never keeps leading breaks, as upstream.
+	// a range never keeps leading breaks, as upstream
 	in := "\n\n{\"a\":1}"
 	got, _ := applyEditsForTest(in, Format(in, &Range{Offset: 0, Length: len(in)}, o))
 	if want := `{ "a": 1 }`; got != want {
@@ -869,22 +834,21 @@ func TestFormatInsertFinalNewline(t *testing.T) {
 	o.InsertFinalNewline = true
 	assertFormat(t, `{"a":1}`, "{\n  \"a\": 1\n}\n", o)
 	assertFormat(t, "{\"a\":1}\n", "{\n  \"a\": 1\n}\n", o)
-	// Trailing whitespace collapses to exactly one EOL.
+	// trailing whitespace collapses to one EOL
 	assertFormat(t, "{\"a\":1}  \n\n", "{\n  \"a\": 1\n}\n", o)
 	assertFormat(t, "// c", "// c\n", o)
-	// A document with no tokens is left alone.
 	assertFormat(t, "", "", o)
 	assertFormat(t, "   ", "   ", o)
-	// The EOL is the document's own.
+	// the document's own EOL
 	assertFormat(t, "{\"a\":1}\r\n", "{\r\n  \"a\": 1\r\n}\r\n", o)
-	// Without it, trailing whitespace is removed, final newline included.
+	// without it, trailing whitespace goes, final newline included
 	assertFormat(t, "{\"a\":1}\n", "{\n  \"a\": 1\n}", spaces2())
 }
 
 // --- properties -----------------------------------------------------------
 
-// formatCorpus is the input set for the property test. It deliberately mixes
-// line endings, comment placements, malformed fragments and multi-byte text.
+// formatCorpus mixes line endings, comment placements, malformed fragments
+// and multi-byte text.
 var formatCorpus = []string{
 	`{"a":1}`, `{}`, `[]`, `{"a":{"b":1}}`, `[1,2]`, `[[1]]`,
 	"{\n\n\n  \"a\"   :    1   }", `{"a":{"b":{}}}`, `[[[]]]`,
@@ -907,10 +871,8 @@ var formatCorpus = []string{
 	"{\r\n  \"a\": [\r\n    1\r\n  ]\r\n}",
 }
 
-// TestFormatProperties asserts, over the whole corpus and several option sets,
-// the four things that must hold no matter what the output looks like:
-// whitespace-only minimal edits, idempotence, token preservation, and value
-// preservation.
+// TestFormatProperties checks what has to hold whatever the output: minimal
+// whitespace-only edits, idempotence, token and value preservation.
 func TestFormatProperties(t *testing.T) {
 	optionSets := map[string]FormatOptions{
 		"spaces2":   spaces2(),
@@ -933,16 +895,14 @@ func TestFormatProperties(t *testing.T) {
 				if err != nil {
 					t.Fatalf("applying edits: %v", err)
 				}
-				// Idempotence.
 				if again := Format(once, nil, o); len(again) != 0 {
 					twice, _ := applyEditsForTest(once, again)
 					t.Errorf("not idempotent:\n once %q\ntwice %q\nedits %+v", once, twice, again)
 				}
-				// Token preservation.
 				if before, after := tokenSignature(in), tokenSignature(once); !reflect.DeepEqual(before, after) {
 					t.Errorf("token sequence changed:\n in  %q -> %q\n before %q\n after  %q", in, once, before, after)
 				}
-				// Value preservation, for the inputs that parse cleanly.
+				// value preservation, for input that parses cleanly
 				if v, errs := Parse(in); len(errs) == 0 {
 					w, werrs := Parse(once)
 					if len(werrs) != 0 {
@@ -967,8 +927,8 @@ type goldenCase struct {
 	Edits   []Edit `json:"edits"`
 }
 
-// goldenOptions and goldenRanges must stay in step with the tables in
-// testdata/gen_format_golden.js; the names are what the golden file records.
+// goldenOptions and goldenRanges match the tables in
+// testdata/gen_format_golden.js by name.
 var goldenOptions = map[string]FormatOptions{
 	"spaces2":   {TabSize: 2, InsertSpaces: true, EOL: "\n"},
 	"tabs4":     {TabSize: 4, InsertSpaces: false, EOL: "\n"},
@@ -983,13 +943,10 @@ var goldenOptions = map[string]FormatOptions{
 	"keepFinal": {TabSize: 2, InsertSpaces: true, EOL: "\r\n", KeepLines: true, InsertFinalNewline: true},
 }
 
-// adjustForLeadingBreaks rewrites upstream's recorded answer for the one place
-// we deliberately differ: the leading line breaks under KeepLines, where
-// upstream emits an insertion at offset 0 plus a deletion of the gap, and for
-// a document with no tokens only the insertion. We emit one minimal edit over
-// the gap, and nothing for a document with no tokens. See formatter.run.
-//
-// Everything else in the case is compared exactly as recorded.
+// adjustForLeadingBreaks rewrites upstream's recorded answer where we differ
+// on purpose: KeepLines' leading breaks. Upstream emits an insert at 0 plus a
+// delete of the gap (just the insert with no tokens); we emit one minimal edit,
+// or nothing with no tokens. Everything else is compared as recorded.
 func adjustForLeadingBreaks(t *testing.T, c *goldenCase, o FormatOptions) {
 	t.Helper()
 	lead := c.Text[:len(c.Text)-len(strings.TrimLeft(c.Text, " \t\r\n\v\f"))]
@@ -1012,7 +969,7 @@ func adjustForLeadingBreaks(t *testing.T, c *goldenCase, o FormatOptions) {
 			c.Edits = append([]Edit{merged}, rest...)
 		}
 	} else {
-		// No deletion follows: the document has no tokens.
+		// no delete follows: the document has no tokens
 		c.Edits = e[1:]
 	}
 	c.Applied, _ = applyEditsForTest(c.Text, c.Edits)
@@ -1036,16 +993,12 @@ func isASCII(s string) bool {
 	return true
 }
 
-// TestFormatGoldenCorpus replays the recorded output of the real
-// node-jsonc-parser for every case in testdata/format-golden.jsonl.
-//
-// The rest of this file pins a few dozen strings by hand and otherwise checks
-// structural properties -- whitespace-only, idempotent, token-preserving --
-// which hold for any sane whitespace rewriter, not specifically for upstream's.
-// This test is the one that fails when we drift from upstream's exact answers.
-// It needs no node: the answers are frozen in the file. Regenerate it with
-// testdata/gen_format_golden.js when pinning a new upstream version, and read
-// the diff -- every changed line is a behavior change.
+// TestFormatGoldenCorpus replays node-jsonc-parser's recorded output from
+// testdata/format-golden.jsonl. Everything else here holds for any sane
+// whitespace rewriter; this is the test that fails when we drift from
+// upstream. No node needed. Regenerate with testdata/gen_format_golden.js for
+// a new upstream version, and read the diff; every changed line is a behavior
+// change.
 func TestFormatGoldenCorpus(t *testing.T) {
 	f, err := os.Open(filepath.Join("testdata", "format-golden.jsonl"))
 	if err != nil {
@@ -1101,10 +1054,8 @@ func TestFormatGoldenCorpus(t *testing.T) {
 		}
 
 		bad := got != c.Applied
-		// Upstream's offsets are UTF-16 code units and ours are bytes, so the
-		// recorded edit list is only comparable for ASCII documents. The
-		// generator records it exactly then, and its absence there is a bug in
-		// the corpus, not a case to skip.
+		// Upstream's offsets are UTF-16 and ours are bytes, so edit lists only
+		// compare for ASCII; a missing one there is a corpus bug, not a skip.
 		if isASCII(c.Text) {
 			if c.Edits == nil {
 				t.Fatalf("line %d: ASCII case with no recorded edits: %+v", line, c)
@@ -1133,8 +1084,8 @@ func TestFormatGoldenCorpus(t *testing.T) {
 	t.Logf("replayed %d cases recorded from node-jsonc-parser %s", n, header.Upstream)
 }
 
-// TestFormatPropertiesForRanges runs the same structural checks for every
-// range of a handful of documents.
+// TestFormatPropertiesForRanges runs the structural checks over every range
+// of a few documents.
 func TestFormatPropertiesForRanges(t *testing.T) {
 	docs := []string{
 		"{\n  \"a\":1,\n  \"b\": {\"c\":2}\n}",

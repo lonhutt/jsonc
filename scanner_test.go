@@ -2,8 +2,8 @@ package jsonc
 
 import "testing"
 
-// assertKinds scans text to EOF and compares the token sequence.
-// Ported from upstream's assertKinds helper in json.test.ts.
+// assertKinds scans text to EOF and checks the token kinds; upstream's
+// assertKinds.
 func assertKinds(t *testing.T, text string, want ...SyntaxKind) {
 	t.Helper()
 	s := NewScanner(text)
@@ -54,8 +54,7 @@ func TestScanOffsetsAndLengths(t *testing.T) {
 }
 
 func TestScanLineTracking(t *testing.T) {
-	// Byte columns, 0-based lines. Token 3 is Unknown until Task 2 implements
-	// strings, so this asserts only line and column, which hold either way.
+	// columns are bytes, lines 0-based
 	s := NewScanner("{\n\"é\":1}")
 	if k := s.Scan(); k != OpenBrace || s.StartLine() != 0 || s.StartColumn() != 0 {
 		t.Fatalf("token 1 = %v line %d col %d, want OpenBrace 0,0", k, s.StartLine(), s.StartColumn())
@@ -63,7 +62,6 @@ func TestScanLineTracking(t *testing.T) {
 	if k := s.Scan(); k != LineBreak || s.StartLine() != 0 || s.StartColumn() != 1 {
 		t.Fatalf("token 2 = %v line %d col %d, want LineBreak 0,1", k, s.StartLine(), s.StartColumn())
 	}
-	// After the line break the scanner must report line 1, column 0.
 	s.Scan()
 	if s.StartLine() != 1 || s.StartColumn() != 0 {
 		t.Fatalf("token 3 line %d col %d, want 1,0", s.StartLine(), s.StartColumn())
@@ -89,8 +87,7 @@ func TestSetPosition(t *testing.T) {
 }
 
 func TestSetPositionResetsLineTracking(t *testing.T) {
-	// Jumping BACKWARD must not leave stale line state behind. A column is a
-	// byte count from the start of a line, so it can never be negative.
+	// jumping back mustn't leave stale line state; columns can't go negative
 	s := NewScanner("{\n}[]")
 	s.Scan()
 	s.Scan()
@@ -103,11 +100,9 @@ func TestSetPositionResetsLineTracking(t *testing.T) {
 		t.Errorf("after SetPosition(0): line %d col %d, want 0,0", s.StartLine(), s.StartColumn())
 	}
 
-	// Jumping FORWARD past a line break must report the real line.
 	s2 := NewScanner("{\n\n  []")
 	s2.SetPosition(5)
-	// Before the next Scan, StartColumn reflects the jump target itself and
-	// must never be negative.
+	// before the next Scan, StartColumn is the jump target's
 	if col := s2.StartColumn(); col < 0 {
 		t.Errorf("after SetPosition(5), before Scan: StartColumn() = %d, want >= 0", col)
 	}
@@ -118,7 +113,7 @@ func TestSetPositionResetsLineTracking(t *testing.T) {
 		t.Errorf("after SetPosition(5): line %d col %d, want 2,2", s2.StartLine(), s2.StartColumn())
 	}
 
-	// \r\n counts as one line break across a jump.
+	// \r\n is one line break across a jump
 	s3 := NewScanner("{\r\n[]")
 	s3.SetPosition(3)
 	s3.Scan()
@@ -128,7 +123,7 @@ func TestSetPositionResetsLineTracking(t *testing.T) {
 }
 
 func TestSetPositionNegative(t *testing.T) {
-	// A negative position clamps to 0 rather than panicking on the next Scan.
+	// used to panic on the next Scan
 	for _, pos := range []int{-5, -1} {
 		s := NewScanner("{}")
 		s.SetPosition(pos)
@@ -164,19 +159,17 @@ func TestScanStrings(t *testing.T) {
 	assertValue(t, `"\/"`, StringLiteral, "/", ScanNone)
 	assertValue(t, `"\b\f\n\r\t"`, StringLiteral, "\b\f\n\r\t", ScanNone)
 	assertValue(t, `"é"`, StringLiteral, "é", ScanNone)
-	// Surrogate pair must decode to one rune, not two replacement chars.
+	// a surrogate pair decodes to one rune
 	assertValue(t, `"😀"`, StringLiteral, "😀", ScanNone)
-	// Multi-byte input passes through untouched.
 	assertValue(t, `"héllo"`, StringLiteral, "héllo", ScanNone)
 }
 
 func TestScanStringErrors(t *testing.T) {
 	assertValue(t, `"unterminated`, StringLiteral, "unterminated", ScanUnexpectedEndOfString)
-	// A line break terminates a string: the value stops there.
 	assertValue(t, "\"broken\nrest\"", StringLiteral, "broken", ScanUnexpectedEndOfString)
 	assertValue(t, `"\q"`, StringLiteral, "�", ScanInvalidEscapeCharacter)
 	assertValue(t, `"\u00"`, StringLiteral, "�", ScanInvalidUnicode)
-	// A lone high surrogate yields U+FFFD and an error, not a panic.
+	// a lone high surrogate gives U+FFFD and an error, not a panic
 	assertValue(t, `"\ud83d"`, StringLiteral, "�", ScanInvalidUnicode)
 }
 
@@ -188,7 +181,7 @@ func TestScanNumbers(t *testing.T) {
 	assertValue(t, "1e10", NumericLiteral, "1e10", ScanNone)
 	assertValue(t, "-1.5e-10", NumericLiteral, "-1.5e-10", ScanNone)
 	assertValue(t, "1E+2", NumericLiteral, "1E+2", ScanNone)
-	// Value is the RAW source text, not a normalized number.
+	// Value is the raw text, not a normalized number
 	assertValue(t, "1.50", NumericLiteral, "1.50", ScanNone)
 }
 
@@ -202,7 +195,6 @@ func TestScanKeywords(t *testing.T) {
 	assertValue(t, "true", TrueKeyword, "true", ScanNone)
 	assertValue(t, "false", FalseKeyword, "false", ScanNone)
 	assertValue(t, "null", NullKeyword, "null", ScanNone)
-	// An unrecognized word is a single Unknown token covering the whole word.
 	assertValue(t, "tru", Unknown, "tru", ScanInvalidCharacter)
 	assertValue(t, "undefined", Unknown, "undefined", ScanInvalidCharacter)
 }
@@ -218,16 +210,14 @@ func TestScanComments(t *testing.T) {
 	assertValue(t, "//", LineComment, "//", ScanNone)
 	assertValue(t, "/* block */", BlockComment, "/* block */", ScanNone)
 	assertValue(t, "/**/", BlockComment, "/**/", ScanNone)
-	// A line comment stops at the line break; it does not consume it.
+	// a line comment stops before the line break
 	assertKinds(t, "// c\n{", LineComment, LineBreak, OpenBrace)
 	assertKinds(t, "/* a */{", BlockComment, OpenBrace)
-	// A block comment spanning lines keeps line tracking correct.
 	assertKinds(t, "/* a\nb */{", BlockComment, OpenBrace)
 }
 
 func TestScanCommentErrors(t *testing.T) {
 	assertValue(t, "/* unterminated", BlockComment, "/* unterminated", ScanUnexpectedEndOfComment)
-	// A lone slash is not a comment.
 	assertValue(t, "/", Unknown, "/", ScanInvalidCharacter)
 	assertValue(t, "/x", Unknown, "/", ScanInvalidCharacter)
 }
@@ -241,7 +231,7 @@ func TestBlockCommentLineTracking(t *testing.T) {
 	if k := s.Scan(); k != OpenBrace {
 		t.Fatalf("token 3 = %v, want OpenBrace", k)
 	}
-	// Two line breaks were consumed: one inside the comment, one after it.
+	// one break inside the comment, one after it
 	if s.StartLine() != 2 {
 		t.Errorf("OpenBrace on line %d, want 2", s.StartLine())
 	}
@@ -268,28 +258,22 @@ func BenchmarkScanPlainString(b *testing.B) {
 	}
 }
 
-// Regression: the literal text BETWEEN two escapes was dropped, because the
-// pending run was flushed only when the builder was first allocated. Any
-// string with two or more escapes silently lost data.
+// Regression: text between two escapes was dropped; the pending run was only
+// flushed when the builder was first allocated.
 func TestScanStringMultipleEscapes(t *testing.T) {
 	tests := []struct{ in, want string }{
-		// Single-character escapes with literal runs between them.
 		{`"a\tb\tc"`, "a\tb\tc"},
 		{`"one\ttwo\tthree\tfour"`, "one\ttwo\tthree\tfour"},
 		{`"x\ny\nz"`, "x\ny\nz"},
 		{`"\\a\\b"`, `\a\b`},
 		{`"a\"b\"c"`, `a"b"c`},
-		// \u escapes with literal runs between them: a different writeEscape
-		// path from the single-character escapes above.
+		// \u escapes go through a different writeEscape path
 		{`"a\u0042b\u0043c"`, "aBbCc"},
 		{`"a\tb\u00e9"`, "a\tbé"},
-		// Adjacent escapes leave EMPTY runs between them, so this case decodes
-		// correctly even with the flush bug. It is the blind spot that let the
-		// bug survive, kept deliberately as a control -- never mistake it for
-		// coverage of the flush.
+		// Adjacent escapes leave empty runs, so this passes even with the flush
+		// bug; it's a control, not coverage.
 		{`"\u0041\u0042\u0043"`, "ABC"},
-		// Escape at the very start, and at the very end (the final flush then
-		// writes an empty run before the closing quote).
+		// escapes at the very start and the very end
 		{`"\ta\tb"`, "\ta\tb"},
 		{`"a\tb\t"`, "a\tb\t"},
 	}

@@ -1,52 +1,34 @@
 package jsonc
 
-// Path identifies a value inside a JSON document. Each element is either a
-// string (an object property name) or an int (an array index).
-//
-// A Path element of any other type is malformed. How that is reported depends
-// on the function: Modify and Remove return an error, FindNodeAtLocation
-// returns nil, and Location.Matches returns false.
+// Path identifies a value in a document; each element is a property name
+// (string) or an array index (int). Any other element is malformed: Modify and
+// Remove return an error, FindNodeAtLocation returns nil, and Location.Matches
+// returns false.
 type Path []any
 
-// Location describes the position of an offset inside a JSON document: which
-// value encloses it, and whether the offset sits on a property name.
+// Location is where an offset sits in a document.
 type Location struct {
-	// PreviousNode is the node the offset falls inside or immediately after:
-	// the property whose key is being typed, or the literal just closed. It is
-	// nil when the offset sits somewhere with no such node -- right after a
-	// ':' or ',', or just inside or after a bracket.
+	// PreviousNode is the token the offset is in or just after: a key being
+	// typed, or a literal just finished. Nil right after ':' or ',', or next to
+	// a bracket.
 	//
-	// It is a standalone node describing one token, not part of a parse tree:
-	// Parent and Children are always nil, and only Type, Literal, Offset and
-	// Length carry meaning. For a NodeProperty, Literal is the key name and
-	// the span covers the key token alone. Use ParseTree when a real tree is
-	// what you want.
+	// It's a lone node, not part of a tree; Parent and Children are nil. For a
+	// property, Literal is the key and the span is just the key token.
 	PreviousNode *Node
-	// Path is the JSON path of the value at the offset. For a property key,
-	// the last element is the key name -- the empty string when no key has
-	// been typed yet. GetLocation never returns a nil Path, though the zero
-	// Location has one.
-	Path Path
-	// IsAtPropertyKey reports whether the offset is on a property name rather
-	// than a value.
+	// Path is the path at the offset. On a key, the last element is the key
+	// name; "" if nothing's typed yet. Never nil from GetLocation.
+	Path            Path
 	IsAtPropertyKey bool
 }
 
-// Matches reports whether pattern describes this location's path.
+// Matches reports whether pattern describes the location's path. "*" matches
+// any one segment, and a shorter pattern matches as a prefix, so
+// Path{"dependencies"} matches anywhere inside that object. An element that
+// isn't a string or int never matches.
 //
-// A pattern element of "*" matches any single segment, and a pattern shorter
-// than the path matches as a prefix, so Matches(Path{"dependencies"}) is true
-// anywhere inside the "dependencies" object. The empty pattern matches every
-// location; a pattern longer than the path matches none.
-//
-// A malformed pattern element -- anything other than a string or an int --
-// never matches.
-//
-// The element "**" is carried over from upstream, where it permits skipping
-// path segments but never advances the pattern itself. The practical effect
-// is that a pattern containing "**" matches only if some later path segment
-// is the literal string "**"; it is not a recursive wildcard. It is kept for
-// behavioral parity, not because it is useful.
+// "**" is only here for parity with upstream, where it isn't a recursive
+// wildcard; it skips segments but never advances, so it only matches a later
+// segment that's literally "**".
 func (l Location) Matches(pattern Path) bool {
 	k := 0
 	for i := 0; k < len(pattern) && i < len(l.Path); i++ {
@@ -59,11 +41,8 @@ func (l Location) Matches(pattern Path) bool {
 	return k == len(pattern)
 }
 
-// segmentEqual reports whether a pattern element and a path segment are the
-// same segment. Only a string or an int is a well formed segment, so anything
-// else -- including the nil placeholder a non-string property key leaves in a
-// path -- is never equal to anything. Comparing the interfaces directly would
-// instead make nil equal nil, and would panic on an uncomparable element.
+// segmentEqual compares by type instead of ==, which would make the nil left by
+// a non-string key equal nil, and panic on an uncomparable element.
 func segmentEqual(pattern, segment any) bool {
 	switch p := pattern.(type) {
 	case string:
@@ -77,31 +56,21 @@ func segmentEqual(pattern, segment any) bool {
 	}
 }
 
-// GetLocation evaluates the location of offset within text: the path of the
-// value there, the node just before it, and whether it is a property key.
-//
-// It is defined for incomplete and invalid documents -- supporting completion
-// in a half-typed file is its main purpose -- so it never reports errors.
+// GetLocation returns where offset sits in text. It's meant for completion in
+// half-typed files, so it never reports errors.
 func GetLocation(text string, offset int) Location {
-	// segments is the live path stack, maintained here rather than taken from
-	// Span.Path: this stack tracks where the *caret* is, which is not the same
-	// thing. After a ',' the caret is at the next, not-yet-parsed element, so
-	// the stack advances an array index or resets an object key to "" --
-	// neither of which the parser's own path does.
+	// segments tracks the caret, which isn't the same as Span.Path; after a ','
+	// the caret is already on the next element.
 	segments := Path{}
 	var previousNode *Node
 	isAtPropertyKey := false
 
-	// done replaces upstream's earlyReturnException. Visit cannot be stopped
-	// from a callback, so every callback returns immediately once the caret
-	// has been passed; the remaining events simply have no effect.
+	// Visit can't be stopped from a callback (upstream throws), so events past
+	// the caret are ignored.
 	done := false
 
 	setPreviousNode := func(value any, offset, length int, t NodeType) {
-		// Upstream also clears colonOffset here and sets it from the ':'
-		// separator below. Both are unobservable: the separator handler drops
-		// previousNode in the same breath, and this node is freshly allocated
-		// rather than the single reused instance upstream keeps.
+		// upstream also tracks colonOffset here; it's never observable
 		previousNode = &Node{Type: t, Literal: value, Offset: offset, Length: length, ColonOffset: -1}
 	}
 
@@ -116,7 +85,7 @@ func GetLocation(text string, offset int) Location {
 			}
 			previousNode = nil
 			isAtPropertyKey = true
-			segments = append(segments, "") // a placeholder for the first key
+			segments = append(segments, "") // first key, not typed yet
 		},
 		OnObjectProperty: func(name string, s Span) {
 			if done {
@@ -128,8 +97,7 @@ func GetLocation(text string, offset int) Location {
 			}
 			setPreviousNode(name, s.Offset, s.Length, NodeProperty)
 			segments[len(segments)-1] = name
-			// The right bound is included: a caret at the very end of a key is
-			// still on the key.
+			// a caret right at the end of a key is still on it
 			if offset <= s.Offset+s.Length {
 				done = true
 			}
@@ -190,12 +158,11 @@ func GetLocation(text string, offset int) Location {
 			}
 			switch {
 			case sep == ":" && previousNode != nil && previousNode.Type == NodeProperty:
-				// The key is finished; the caret is now at a value.
+				// the key's done; the caret is at a value now
 				isAtPropertyKey = false
 				previousNode = nil
 			case sep == ",":
-				// Step to the next element: the next array index, or a fresh,
-				// not-yet-typed object key.
+				// next element: the next index, or a new, untyped key
 				if i, ok := segments[len(segments)-1].(int); ok {
 					segments[len(segments)-1] = i + 1
 				} else {

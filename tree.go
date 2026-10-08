@@ -13,28 +13,23 @@ const (
 	NodeNull     NodeType = "null"
 )
 
-// Node is one node of a parsed JSONC document. Offsets and lengths are byte
-// offsets into the original text.
+// Node is one node of the parse tree. Offsets are bytes. A tree doesn't change
+// after ParseTree returns, so concurrent reads are safe.
 //
-// A Node tree is immutable once ParseTree returns and is safe for concurrent
-// reads, despite the Parent pointers.
-//
-// A property node has exactly two children when well formed: the key (a
-// NodeString) and the value. Its ColonOffset locates the ':' between them.
+// A well-formed property has two children, key then value, and ColonOffset is
+// the ':' between them; -1 otherwise.
 type Node struct {
 	Type NodeType
-	// Literal is the value of a scalar node (string, number, boolean, null).
-	// It is nil for object, array, and property nodes; use Value for those.
+	// Literal is a scalar's value; nil for objects, arrays and properties, which
+	// have Value instead.
 	Literal        any
 	Offset, Length int
-	// ColonOffset is the byte offset of the ':' in a property node, or -1.
-	ColonOffset int
-	Parent      *Node
-	Children    []*Node
+	ColonOffset    int
+	Parent         *Node
+	Children       []*Node
 }
 
-// Value materializes this subtree as a Go value, using the same types as
-// Parse. It replaces upstream's getNodeValue.
+// Value returns the subtree as Parse would; upstream's getNodeValue.
 func (n *Node) Value() any {
 	if n == nil {
 		return nil
@@ -44,7 +39,7 @@ func (n *Node) Value() any {
 		m := make(map[string]any, len(n.Children))
 		for _, prop := range n.Children {
 			if len(prop.Children) != 2 {
-				continue // malformed property from a tolerant parse
+				continue // incomplete property
 			}
 			key, ok := prop.Children[0].Literal.(string)
 			if !ok {
@@ -69,8 +64,7 @@ func (n *Node) Value() any {
 	}
 }
 
-// Path returns the JSON path from the document root to this node. It replaces
-// upstream's getNodePath.
+// Path returns the path from the root to n; upstream's getNodePath.
 func (n *Node) Path() Path {
 	if n == nil || n.Parent == nil {
 		return Path{}
@@ -78,7 +72,6 @@ func (n *Node) Path() Path {
 	parentPath := n.Parent.Path()
 	switch n.Parent.Type {
 	case NodeProperty:
-		// The key node has the same path as the property itself.
 		key, _ := n.Parent.Children[0].Literal.(string)
 		return append(parentPath, key)
 	case NodeArray:
@@ -91,10 +84,8 @@ func (n *Node) Path() Path {
 	return parentPath
 }
 
-// ParseTree parses text into a tree that preserves source offsets and object
-// key order. Like Parse it is fault tolerant, returning a best-effort tree
-// alongside every problem found. It returns nil only when the document
-// contains no value at all.
+// ParseTree parses text into a tree that keeps offsets and key order. It's
+// fault tolerant like Parse; the root is nil only when there's no value at all.
 func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 	var (
 		root    *Node
@@ -102,9 +93,8 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 		errs    []ParseError
 	)
 
-	// ensureProperty closes a property that has received BOTH its key and its
-	// value, extending it to cover the value. A property's parent is always an
-	// object, so one pop ends it.
+	// ensureProperty closes a property once it has its value. Its parent is
+	// always an object, so one step up is enough.
 	ensureProperty := func() {
 		if current != nil && current.Type == NodeProperty && len(current.Children) == 2 {
 			current.Length = current.Children[1].Offset + current.Children[1].Length - current.Offset
@@ -112,8 +102,8 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 		}
 	}
 
-	// ensurePropertyComplete closes a property that will NEVER receive a
-	// value, extending it to endOffset. It does not require a value child.
+	// ensurePropertyComplete closes a property that won't get a value, like
+	// `{"a":}`, ending it at endOffset.
 	ensurePropertyComplete := func(endOffset int) {
 		if current != nil && current.Type == NodeProperty {
 			current.Length = endOffset - current.Offset
@@ -141,12 +131,9 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 			current = attach(newNode(NodeObject, s))
 		},
 		OnObjectProperty: func(name string, s Span) {
-			// Defensive: close any property still open before attaching a
-			// sibling. Unreachable under the current grammar -- every recovery
-			// skip in Visit stops at ',' or '}' or EOF, so a property name
-			// cannot appear while a prior property is still open. Kept because
-			// the cost is one no-op branch and the cost of being wrong is
-			// silent tree corruption, which is what this task just fixed.
+			// Unreachable today; Visit's recovery always stops at ',', '}' or
+			// EOF. Kept as a guard since a property left open silently
+			// corrupts the tree.
 			ensurePropertyComplete(s.Offset)
 			prop := attach(newNode(NodeProperty, s))
 			current = prop
@@ -157,8 +144,7 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 		},
 		OnObjectEnd: func(s Span) {
 			ensurePropertyComplete(s.Offset)
-			// s is positioned at the closing brace (or EOF for an
-			// unterminated object); Length covers it.
+			// s is the closing brace, or EOF if unterminated
 			current.Length = s.Offset + s.Length - current.Offset
 			current = current.Parent
 			ensureProperty()
@@ -210,10 +196,8 @@ func literalType(v any) NodeType {
 	}
 }
 
-// FindNodeAtLocation returns the node at path, or nil if there is none.
-//
-// A malformed path element -- anything other than a string or an int --
-// yields nil, the same as a path that simply does not resolve.
+// FindNodeAtLocation returns the node at path, or nil. A path element that
+// isn't a string or int gives nil too.
 func FindNodeAtLocation(root *Node, path Path) *Node {
 	node := root
 	for _, seg := range path {
@@ -251,10 +235,8 @@ func FindNodeAtLocation(root *Node, path Path) *Node {
 }
 
 // FindNodeAtOffset returns the innermost node containing offset, or nil.
-//
-// With includeRightBound false a node matches offsets in
-// [Offset, Offset+Length); with it true the range is inclusive at both ends,
-// which is what an editor wants when the caret sits just past a token.
+// includeRightBound also matches the offset just past a node's end; what an
+// editor wants with the caret right after a token.
 func FindNodeAtOffset(root *Node, offset int, includeRightBound bool) *Node {
 	if root == nil {
 		return nil

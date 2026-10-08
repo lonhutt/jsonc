@@ -78,7 +78,6 @@ func TestNodeValue(t *testing.T) {
 	if got := root.Value(); !reflect.DeepEqual(got, want) {
 		t.Errorf("root.Value() = %#v, want %#v", got, want)
 	}
-	// A scalar node materializes to its own value.
 	if got := root.Children[1].Children[1].Value(); got != "x" {
 		t.Errorf("scalar Value() = %v, want x", got)
 	}
@@ -132,8 +131,8 @@ func TestParseTreeEmptyInput(t *testing.T) {
 }
 
 func TestParseTreeMissingPropertyValue(t *testing.T) {
-	// A property whose value never arrives must still close, or every later
-	// event treats it as the enclosing container.
+	// a property whose value never arrives still has to close, or later events
+	// treat it as the container
 	for _, in := range []string{
 		`{"a":}`, `{"a":,"b":2}`, `{"a":{"b":}}`, `{"a":1,"b":}`,
 		`{"a":`, `{"a": "b":2}`, `{"a":1 "b":2}`,
@@ -143,12 +142,11 @@ func TestParseTreeMissingPropertyValue(t *testing.T) {
 			t.Errorf("ParseTree(%q) = nil, want a best-effort tree", in)
 			continue
 		}
-		// Node.Value() must agree with Parse on the same text.
 		p, _ := Parse(in)
 		if !reflect.DeepEqual(root.Value(), p) {
 			t.Errorf("ParseTree(%q).Value() = %#v, Parse = %#v", in, root.Value(), p)
 		}
-		// Every child's span must sit inside its parent's span.
+		// every child's span sits inside its parent's
 		var check func(n *Node)
 		check = func(n *Node) {
 			for _, c := range n.Children {
@@ -161,7 +159,7 @@ func TestParseTreeMissingPropertyValue(t *testing.T) {
 			}
 		}
 		check(root)
-		// The root must span the whole document, not stop at its first byte.
+		// the root spans the whole document
 		if root.Offset != 0 || root.Length != len(in) {
 			t.Errorf("ParseTree(%q) root spans [%d,%d), want [0,%d)",
 				in, root.Offset, root.Offset+root.Length, len(in))
@@ -170,10 +168,9 @@ func TestParseTreeMissingPropertyValue(t *testing.T) {
 }
 
 func TestDanglingPropertySpanExcludesDelimiter(t *testing.T) {
-	// A property whose value never arrives must end BEFORE the delimiter that
-	// closed it. If a call site passed s.Offset+s.Length the property would
-	// swallow the '}' or ',' -- a regression that every other assertion in
-	// this file is structurally blind to.
+	// A dangling property ends before the delimiter that closed it; passing
+	// s.Offset+s.Length would swallow the '}' or ',', and nothing else here would
+	// notice.
 	cases := []struct{ in, want string }{
 		{`{"a":}`, `"a":`},       // closed by OnObjectEnd
 		{`{"a":,"b":2}`, `"a":`}, // closed by OnSeparator ","
@@ -219,19 +216,16 @@ func TestFindNodeAtLocation(t *testing.T) {
 		}
 	}
 
-	// The {"c"} case above only proves Value() is correct, which a property
-	// node would also satisfy -- Node.Value() on a property delegates to its
-	// value child. Pin that the VALUE node itself is returned, not the
-	// property that wraps it.
+	// Value() can't tell a property from its value, since a property's Value
+	// delegates; pin the node type.
 	if n := FindNodeAtLocation(root, Path{"c"}); n == nil || n.Type != NodeBoolean {
 		t.Errorf(`FindNodeAtLocation({"c"}) = %v, want a NodeBoolean value node`, n)
 	}
 }
 
 func TestFindNodeAtLocationMalformedTrees(t *testing.T) {
-	// A dangling property (key, no value) is reachable from ordinary
-	// fault-tolerant parsing, so navigating one must return nil rather than
-	// panic on Children[1].
+	// {"a":} comes out of ordinary parsing; navigating it returns nil instead of
+	// panicking on Children[1].
 	root, _ := ParseTree(`{"a":}`)
 	if root == nil {
 		t.Fatal("ParseTree(`{\"a\":}`) returned nil")
@@ -243,7 +237,6 @@ func TestFindNodeAtLocationMalformedTrees(t *testing.T) {
 		t.Errorf("descending through a dangling property = %v, want nil", n.Type)
 	}
 
-	// A negative index must be rejected, not used to index Children.
 	arr, _ := ParseTree(`{"a":[1,2]}`)
 	for _, p := range []Path{{"a", -1}, {"a", -99}} {
 		if n := FindNodeAtLocation(arr, p); n != nil {
@@ -259,12 +252,10 @@ func TestFindNodeAtLocationMisses(t *testing.T) {
 		{"a", 5},
 		{"a", "notAnIndex"},
 		{"a", 0, "tooDeep"},
-		{1.5},  // malformed element: not string or int
-		{true}, // malformed element
-		{nil},  // malformed element: nil is a realistic input, not contrived --
-		// a property whose key is not a string can leave a nil placeholder in
-		// a path stack built by calling code.
-		{"a", nil}, // malformed element after a valid descent, not just at the root
+		{1.5},      // malformed element: not string or int
+		{true},     // malformed element
+		{nil},      // a non-string key can leave nil in a caller's path
+		{"a", nil}, // after a valid step, not just at the root
 	} {
 		if n := FindNodeAtLocation(root, p); n != nil {
 			t.Errorf("FindNodeAtLocation(%v) = %v, want nil", p, n.Type)
@@ -280,19 +271,16 @@ func TestFindNodeAtOffset(t *testing.T) {
 	text := `{"a": [1, 22]}`
 	root, _ := ParseTree(text)
 
-	// Offset 2 is inside the key "a".
 	if n := FindNodeAtOffset(root, 2, false); n == nil || n.Literal != "a" {
 		t.Errorf("at offset 2 got %v, want the key node", n)
 	}
-	// Offset 7 is the literal 1.
 	if n := FindNodeAtOffset(root, 7, false); n == nil || n.Literal != float64(1) {
 		t.Errorf("at offset 7 got %v, want literal 1", n)
 	}
-	// Offset 11 is inside the literal 22.
 	if n := FindNodeAtOffset(root, 11, false); n == nil || n.Literal != float64(22) {
 		t.Errorf("at offset 11 got %v, want literal 22", n)
 	}
-	// Offset 5 is the space before the array: innermost containing node is the property.
+	// the space before the array; innermost is the property
 	if n := FindNodeAtOffset(root, 5, false); n == nil || n.Type != NodeProperty {
 		t.Errorf("at offset 5 got %v, want the property node", n)
 	}
@@ -301,7 +289,7 @@ func TestFindNodeAtOffset(t *testing.T) {
 func TestFindNodeAtOffsetRightBound(t *testing.T) {
 	text := `[1]`
 	root, _ := ParseTree(text)
-	// Offset 2 is immediately after the literal "1".
+	// just past the literal 1
 	if n := FindNodeAtOffset(root, 2, false); n != nil && n.Literal == float64(1) {
 		t.Error("without includeRightBound, offset 2 must not match literal 1")
 	}
@@ -311,9 +299,8 @@ func TestFindNodeAtOffsetRightBound(t *testing.T) {
 }
 
 func TestFindNodeAtOffsetRightBoundAtRoot(t *testing.T) {
-	// Same boundary property as TestFindNodeAtOffsetRightBound, but exercised
-	// at the outermost node rather than a leaf, so a mutation that only
-	// happens to satisfy the innermost comparison still gets caught.
+	// Same boundary as TestFindNodeAtOffsetRightBound, but at the root instead
+	// of a leaf.
 	text := `[1]`
 	root, _ := ParseTree(text)
 	end := len(text) // offset 3, exactly at the end of the whole document

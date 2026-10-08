@@ -11,10 +11,10 @@ func TestStripComments(t *testing.T) {
 		{"{\n// c\n\"a\":1}", "{\n\n\"a\":1}"},
 		{`{/* c */"a":1}`, `{"a":1}`},
 		{"{\"a\":1} // trailing", "{\"a\":1} "},
-		// A // inside a string is not a comment.
+		// // inside a string isn't a comment
 		{`{"a":"http://x"}`, `{"a":"http://x"}`},
 		{`{"a":"/* not a comment */"}`, `{"a":"/* not a comment */"}`},
-		// A multi-line block comment collapses but keeps its line breaks.
+		// a multi-line block comment keeps its line breaks
 		{"{/* a\nb */}", "{\n}"},
 	}
 	for _, tc := range tests {
@@ -58,9 +58,8 @@ func TestReplaceCommentsPreservesLineBreaks(t *testing.T) {
 }
 
 func TestStripCommentsCRLF(t *testing.T) {
-	// A CRLF inside a block comment must survive as BOTH bytes, or every line
-	// number after the comment shifts and the document's line endings become
-	// inconsistent.
+	// a CRLF inside a block comment keeps both bytes, or later line numbers
+	// shift
 	in := "{/* a\r\nb */}"
 	got := StripComments(in)
 	want := "{\r\n}"
@@ -78,8 +77,8 @@ func TestReplaceCommentsCRLF(t *testing.T) {
 	if !strings.Contains(got, "\r\n") {
 		t.Errorf("ReplaceComments(%q) = %q, lost the CRLF inside the comment", in, got)
 	}
-	// Both bytes must survive independently: a \r that got replaced while the
-	// \n survived would still contain "\n" but not "\r\n".
+	// both bytes, independently; a replaced \r next to a surviving \n still
+	// contains "\n" but not "\r\n"
 	if strings.Count(got, "\r") != 1 || strings.Count(got, "\n") != 1 {
 		t.Errorf("ReplaceComments(%q) = %q, want exactly one \\r and one \\n", in, got)
 	}

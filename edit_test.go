@@ -38,7 +38,7 @@ func TestApplyEdits(t *testing.T) {
 			[]Edit{{Offset: 0, Length: 2, Content: "X"}, {Offset: 2, Length: 2, Content: "Y"}},
 			"XY",
 		},
-		// Ties at one offset, as node-jsonc-parser 3.3.1 resolves them.
+		// ties at one offset, resolved as upstream does
 		{
 			"insertions at one offset keep input order",
 			"abc",
@@ -70,17 +70,16 @@ func TestApplyEdits(t *testing.T) {
 	}
 }
 
-// Two tied edits cannot catch an unstable sort: Go sorts short slices by
-// insertion, which is stable anyway. Enough ties, mixed with other offsets,
-// can.
+// Two ties can't catch an unstable sort; Go insertion-sorts short slices,
+// which is stable anyway.
 func TestApplyEditsManyInsertionsKeepOrder(t *testing.T) {
 	var edits []Edit
 	var want strings.Builder
 	for i := range 100 {
 		edits = append(edits, Edit{Offset: 1, Length: 0, Content: strconv.Itoa(i) + ","})
 		want.WriteString(strconv.Itoa(i) + ",")
-		// Interleave no-op edits at two other offsets, so the sort has real
-		// work to do around the ties.
+		// no-op edits at two other offsets, so the sort has real work around the
+		// ties
 		edits = append(edits, Edit{Offset: 2 + (99-i)%2, Length: 0, Content: ""})
 	}
 	got, err := ApplyEdits("abcd", edits)

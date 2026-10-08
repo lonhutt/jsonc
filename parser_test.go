@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// collectErrors runs Visit and returns just the error codes, in order.
+// collectErrors returns Visit's error codes in order.
 func collectErrors(t *testing.T, text string, opts ...ParseOption) []ParseErrorCode {
 	t.Helper()
 	var codes []ParseErrorCode
@@ -17,8 +17,8 @@ func collectErrors(t *testing.T, text string, opts ...ParseOption) []ParseErrorC
 	return codes
 }
 
-// events records the visitor callback sequence as readable strings, which
-// makes a failure message show what actually happened.
+// events records the callback sequence as strings, so a failure shows what
+// happened.
 func events(text string, opts ...ParseOption) []string {
 	var out []string
 	Visit(text, Visitor{
@@ -48,8 +48,7 @@ func TestVisitSequence(t *testing.T) {
 		{`"s"`, []string{"val:s"}},
 		{`// c` + "\n" + `1`, []string{"comment", "val:1"}},
 		{`/* c */ 1`, []string{"comment", "val:1"}},
-		// All five literal kinds: null decodes to nil, the keywords to bools,
-		// the number to a float64, and the string to its DECODED value.
+		// all five literal kinds; the string comes back decoded
 		{`[null,true,false,1,"s"]`, []string{"[", "val:<nil>", "sep:,", "val:true", "sep:,", "val:false", "sep:,", "val:1", "sep:,", "val:s", "]"}},
 		{`["a\tb\u00e9"]`, []string{"[", "val:a\tb\u00e9", "]"}},
 	}
@@ -67,7 +66,7 @@ func TestVisitSpanOffsets(t *testing.T) {
 		OnObjectProperty: func(_ string, s Span) { keySpan = s },
 		OnLiteralValue:   func(_ any, s Span) { valSpan = s },
 	})
-	// The key span covers the quoted literal "ab", offsets 1..5.
+	// the key span covers the quoted "ab"
 	if keySpan.Offset != 1 || keySpan.Length != 4 {
 		t.Errorf("key span = offset %d len %d, want 1,4", keySpan.Offset, keySpan.Length)
 	}
@@ -116,7 +115,7 @@ func TestVisitErrorRecovery(t *testing.T) {
 }
 
 func TestVisitRecoveryContinues(t *testing.T) {
-	// A missing comma must resync at the next property, not discard the rest.
+	// a missing comma resyncs at the next property instead of dropping the rest
 	got := events(`{"a":1 "b":2}`)
 	want := []string{"{", "key:a", "sep::", "val:1", "key:b", "sep::", "val:2", "}"}
 	if !reflect.DeepEqual(got, want) {
@@ -125,8 +124,8 @@ func TestVisitRecoveryContinues(t *testing.T) {
 }
 
 func TestVisitSynthesizesClosers(t *testing.T) {
-	// An unterminated object must still fire OnObjectEnd so consumers that
-	// maintain a stack can unwind it.
+	// an unterminated object still fires OnObjectEnd, so a consumer's stack
+	// unwinds
 	got := events(`{"a":1`)
 	want := []string{"{", "key:a", "sep::", "val:1", "}"}
 	if !reflect.DeepEqual(got, want) {
@@ -162,8 +161,7 @@ func TestParseErrorFields(t *testing.T) {
 	if errs[0].StartLine != 1 {
 		t.Errorf("StartLine = %d, want 1", errs[0].StartLine)
 	}
-	// The colon is missing before the "1" at offset 8, on line 1 (0-based),
-	// column 6 (0-based bytes from the start of that line: "  \"a\" 1").
+	// colon missing before the 1 at offset 8; line 1, column 6
 	const wantMsg = `ColonExpected at offset 8 (line 1, column 6)`
 	if got := errs[0].Error(); got != wantMsg {
 		t.Errorf("Error() = %q, want %q", got, wantMsg)
@@ -187,27 +185,25 @@ func TestVisitNumberRange(t *testing.T) {
 		return v, codes
 	}
 
-	// Out of float64 range: reported and zeroed on the float64 path...
+	// out of range: reported and zeroed as a float64..
 	if v, codes := probe(`1e400`); v != float64(0) || len(codes) != 1 || codes[0] != InvalidNumberFormat {
 		t.Errorf("1e400 float64 path = %#v, errs %v; want 0 and [InvalidNumberFormat]", v, codes)
 	}
-	// ...but preserved exactly under UseNumber, with no error.
+	// ..but kept exactly with UseNumber, no error
 	if v, codes := probe(`1e400`, UseNumber()); v != json.Number("1e400") || len(codes) != 0 {
 		t.Errorf("1e400 UseNumber = %#v, errs %v; want json.Number(\"1e400\") and no errors", v, codes)
 	}
-	// A large integer survives UseNumber intact.
 	if v, _ := probe(`12345678901234567890`, UseNumber()); v != json.Number("12345678901234567890") {
 		t.Errorf("large int UseNumber = %#v, want digits preserved", v)
 	}
-	// A genuine SYNTAX error is still reported under UseNumber. The scanner
-	// already flags "1e" as UnexpectedEndOfNumber before parseLiteral adds
-	// InvalidNumberFormat, so both codes come out, in that order.
+	// A real syntax error still reports under UseNumber; the scanner flags "1e"
+	// as UnexpectedEndOfNumber, then parseLiteral adds InvalidNumberFormat.
 	if _, codes := probe(`1e`, UseNumber()); len(codes) == 0 {
 		t.Error("1e under UseNumber reported no error; a syntax error must still be reported")
 	}
 }
 
-// Documents the exact codes for "1e" under UseNumber so a change is visible.
+// Pins the exact codes for "1e" under UseNumber.
 func TestVisitNumberSyntaxErrorCodes(t *testing.T) {
 	var codes []ParseErrorCode
 	Visit(`1e`, Visitor{
@@ -219,7 +215,6 @@ func TestVisitNumberSyntaxErrorCodes(t *testing.T) {
 	}
 }
 
-// I1: Visit's bool return is a contract Task 5's Parse branches on.
 func TestVisitReturnValue(t *testing.T) {
 	cases := []struct {
 		text string
@@ -240,10 +235,8 @@ func TestVisitReturnValue(t *testing.T) {
 }
 
 func TestVisitPathIsSnapshotNotLiveRead(t *testing.T) {
-	// Collect the Spans and call Path() only AFTER Visit returns, by which
-	// point the parser's path stack has been fully unwound. If span() ever
-	// reads the live stack instead of snapshotting, these come back empty
-	// or wrong while TestVisitPathSupplier keeps passing.
+	// Call Path() only after Visit returns and the stack has unwound; a live
+	// read instead of a snapshot fails here while TestVisitPathSupplier passes.
 	var spans []Span
 	Visit(`{"a":[10,{"b":true}]}`, Visitor{
 		OnLiteralValue: func(_ any, s Span) { spans = append(spans, s) },
@@ -298,7 +291,6 @@ func TestParseValues(t *testing.T) {
 		{`[1,"a",null]`, []any{float64(1), "a", nil}},
 		{`{"a":1,"b":[true]}`, map[string]any{"a": float64(1), "b": []any{true}}},
 		{`{"a":{"b":{"c":1}}}`, map[string]any{"a": map[string]any{"b": map[string]any{"c": float64(1)}}}},
-		// Comments and trailing commas are the point of the library.
 		{"{\n // c\n \"a\":1\n}", map[string]any{"a": float64(1)}},
 	}
 	for _, tc := range tests {
@@ -313,8 +305,7 @@ func TestParseValues(t *testing.T) {
 }
 
 func TestParseMatchesEncodingJSON(t *testing.T) {
-	// For input that is also valid strict JSON, Parse must agree with the
-	// standard library.
+	// on valid strict JSON, Parse agrees with encoding/json
 	for _, text := range []string{`{"a":[1,2,{"b":null}],"c":"x"}`, `[]`, `{}`, `3.14`, `"é"`} {
 		var want any
 		if err := json.Unmarshal([]byte(text), &want); err != nil {
@@ -346,7 +337,6 @@ func TestParseUseNumber(t *testing.T) {
 }
 
 func TestParseIsFaultTolerant(t *testing.T) {
-	// A broken document still yields the parts that parsed.
 	got, errs := Parse(`{"a":1 "b":2}`)
 	if len(errs) == 0 {
 		t.Error("want at least one error")
@@ -358,7 +348,6 @@ func TestParseIsFaultTolerant(t *testing.T) {
 }
 
 func TestParseNeverReturnsGoError(t *testing.T) {
-	// Deliberate shape check: Parse has exactly two results and the second is
-	// a slice, not an error. This is the library's contract.
+	// compile-time check: the second result is []ParseError, not error
 	var _ func(string, ...ParseOption) (any, []ParseError) = Parse
 }

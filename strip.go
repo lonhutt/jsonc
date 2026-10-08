@@ -2,21 +2,15 @@ package jsonc
 
 import "strings"
 
-// StripComments removes JavaScript-style comments from text, leaving
-// everything else — including line breaks inside block comments — untouched,
-// so the result stays line-comparable with the input.
-//
-// Comment syntax inside a string literal is not a comment and is preserved.
+// StripComments removes comments from text. Line breaks inside block comments
+// stay, so line numbers don't shift. Comment syntax inside a string is left
+// alone.
 func StripComments(text string) string {
 	return stripOrReplace(text, 0, false)
 }
 
-// ReplaceComments replaces every character of every comment with ch, keeping
-// the text exactly the same length so all byte offsets remain valid. Line
-// breaks inside block comments are preserved rather than replaced.
-//
-// Offsets are preserved only when ch encodes to a single byte; pass a
-// multi-byte rune and the result will be longer than the input.
+// ReplaceComments replaces each comment byte except line breaks with ch. Offsets
+// stay valid as long as ch is a single byte.
 func ReplaceComments(text string, ch rune) string {
 	return stripOrReplace(text, ch, true)
 }
@@ -36,22 +30,12 @@ func stripOrReplace(text string, ch rune, replace bool) string {
 			b.WriteString(text[start:end])
 			continue
 		}
-		if !replace {
-			// Keep the line breaks a block comment spanned, so line numbers
-			// after the comment do not shift.
-			for i := start; i < end; i++ {
-				if text[i] == '\n' || text[i] == '\r' {
-					b.WriteByte(text[i])
-				}
-			}
-			continue
-		}
 		for i := start; i < end; i++ {
-			if text[i] == '\n' || text[i] == '\r' {
+			if isLineBreak(text[i]) {
 				b.WriteByte(text[i])
-				continue
+			} else if replace {
+				b.WriteRune(ch)
 			}
-			b.WriteRune(ch)
 		}
 	}
 	return b.String()

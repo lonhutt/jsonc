@@ -1,10 +1,8 @@
-// gen_format_golden.js regenerates testdata/format-golden.jsonl: the exact
-// output of the real node-jsonc-parser's format() for every case in the
-// matrix below. The Go test TestFormatGoldenCorpus replays that file, so our
-// Format cannot drift from upstream's answers without failing `go test` -- on
-// a machine with no node installed.
+// gen_format_golden.js writes testdata/format-golden.jsonl: upstream format()'s
+// output for every case below. TestFormatGoldenCorpus replays it, so Format
+// can't drift from upstream without failing `go test`, and no node is needed.
 //
-// Regenerating (only needed when pinning a new upstream version):
+// Regenerate only when pinning a new upstream version:
 //
 //   cd "$(mktemp -d)"
 //   npm pack jsonc-parser@<version>
@@ -12,34 +10,31 @@
 //   node /path/to/repo/testdata/gen_format_golden.js ./package/lib/umd/main.js \
 //       > /path/to/repo/testdata/format-golden.jsonl
 //
-// Then run `go test ./...` and read the diff before keeping it: every changed
-// line is a behavior change, either upstream's or ours.
+// Then run `go test ./...` and read the diff; every changed line is a behavior
+// change, upstream's or ours.
 //
-// Note on offsets: upstream's are UTF-16 code units, ours are bytes. So for a
-// non-ASCII document only the whole-document ("nil" range) case is comparable,
-// and "edits" is recorded only for pure-ASCII documents. A Range{2,5} means a
-// different span in the two implementations, which is a difference in the
-// INPUT, not a difference in behavior -- recording those would freeze a
-// mismatch. Multi-byte range formatting is covered by the Go-side property
-// tests instead.
+// Upstream's offsets are UTF-16 and ours are bytes, so a non-ASCII document
+// only gets the nil-range case, and edits are only recorded for ASCII. A
+// Range{2,5} is a different span in each; recording it would freeze a
+// difference in the input as if it were one in behavior.
 
 'use strict';
 
 const UPSTREAM_VERSION = '3.3.1';
 
 const documents = [
-	// Well-formed, compact.
+	// well-formed, compact
 	'{"a":1}', '{}', '[]', '{"a":{"b":1}}', '[1,2]', '[[1]]', '{"a":{"b":{}}}',
 	'[[[]]]', '{"a":{"b":{"c":1}}}', '[{"a":1},{"b":2}]', '[1,2,3]',
 	'{"a":[1,{"b":null},true,false,"s"]}', '{"a":"x","b":"y"}', '[1,2,3,4,5,6,7,8,9,10]',
-	// Whitespace the formatter has to collapse.
+	// whitespace to collapse
 	'{\n\n\n  "a"   :    1   }', '{\n\n  "a":1\n}', '{\t"a"\t:\t1\t}',
 	'\n\n  {}', '{"a":1}\n\n  ', '{"a":1}\n', '   ', '',
 	'{\n}', '[\n]', '  "x"  ', '1', '{"a"    :1}',
-	// Already formatted: these must produce no edits at all.
+	// already formatted: no edits
 	'{\n  "a": 1\n}', '{\r\n  "a": 1\r\n}', '{\r\n  "a": [\r\n    1\r\n  ]\r\n}',
 	'{\n  "a":1,\n  "b":2\n}', '{\n  "a":1 // c\n  ,"b":2\n}',
-	// Comments in every syntactic position.
+	// comments in every position
 	'{"a":1/* c */}', '{"a":1   /* c */}', '{// c\n"a":1}', '{\n// c\n"a":1}',
 	'{"a":1 // c\n}', '{"a":1,// c\n"b":2}', '{"a": // c\n1}', '{"a" // c\n: 1}',
 	'[1 // c\n, 2]', '{"a":1\n// c\n}', '{"a":1\n/* c */}', '{\n/* c */ "a":1}',
@@ -47,23 +42,23 @@ const documents = [
 	'{"a":[1,// one\n2],"b":{/*x*/"c":true}}', '[1,\n// c\n]', '{"a":/* x\ny */1}',
 	'{"a":{"b":1 // c\n}}', '{// a\n// b\n"x":1}', '[/*a*//*b*/]', '{"a"://c\n//d\n1}',
 	'{"a":1\n// c\n}\n', '[\n  // head\n  {"a":1}\n]',
-	// Line endings.
+	// line endings
 	'{\r\n"a":1}', '{\r"a":1}', '{\r\n// c\r\n"a":1\r\n}', '{"a":1 // c\r\n}',
-	// Malformed: every path that sets upstream's hasError.
+	// malformed: every path that sets upstream's hasError
 	'[1 2]', '[true false]', '{"a":@}', '[@ 1]', '{"a":@ 1}', '[@,1]',
 	'{"a":1/* x', '{"a":"x}', '{"a" "b"}', '}', ']]]', '{"a":1}}', '[1]]',
 	'[1,,2]', '{"a":}', '{:1}', '{"a":tru}',
-	// Strings that look like syntax.
+	// strings that look like syntax
 	'{"a": "line\\nbreak\\tin\\\\string"}', '{"a":"//not a comment"}',
 	'{"a":"/* not a comment */"}',
-	// Multi-byte.
+	// multi-byte
 	'{"\u00e9\u4e2d":1}', '{"a":"\ud83d\ude00"}', '{"a":"\u00fc","b":"\u6f22\u5b57"}',
-	// Documents whose ranges are interesting.
+	// interesting ranges
 	'{\n  "a": {"b":1}\n}', '{\n\t"a": {"b":1}\n}', '{"x":1,\n  "b"  :  2,\n  "c":3}',
 	'{"a":1}  \nTAIL', 'x\n{"a":1}\n  junk', '{\n   "a":1\n}', '{\n     "a":1\n}',
 	'     {"a":1}',
-	// Blank lines, leading and trailing breaks, and one-line layouts: what
-	// KeepLines and InsertFinalNewline act on.
+	// blank lines, leading and trailing breaks, one-line layouts: what KeepLines
+	// and InsertFinalNewline act on
 	'{\n"a": 1,\n\n"b": 2\n}', '{\n"a": 1,\n\n\n\n"b": 2\n}', '{\r\n\r\n"a":1\r\n}',
 	'{\n  \n"a":1}', '\n\n{"a":1}', '\r\n\r\n  {"a":1}', '{"a":1}\n\n\n', '{"a":1}  \n\n',
 	'{"a":1, "b":2}', '{\n    "a": 1, "b": 2\n}', '[\n1, 2,\n\n3\n]', '{"a":\n\n1}',
@@ -72,7 +67,7 @@ const documents = [
 	'{"a":1}\r\n', '[1]\n\r\n',
 ];
 
-// Named so a failing case reads as something other than a number.
+// Named, so a failing case doesn't read as a number.
 const optionSets = [
 	['spaces2', { TabSize: 2, InsertSpaces: true, EOL: '\n' }],
 	['tabs4', { TabSize: 4, InsertSpaces: false, EOL: '\n' }],
@@ -87,8 +82,8 @@ const optionSets = [
 	['keepFinal', { TabSize: 2, InsertSpaces: true, EOL: '\r\n', KeepLines: true, InsertFinalNewline: true }],
 ];
 
-// Range shapes: whole document, a prefix, a mid-document span, an empty range,
-// one running past the end, and one starting inside a line's indentation.
+// Whole document, a prefix, a middle span, empty, past the end, and one
+// starting inside a line's indentation.
 const rangeShapes = [
 	['nil', null],
 	['head', { Offset: 0, Length: 3 }],
@@ -99,7 +94,7 @@ const rangeShapes = [
 ];
 
 function main() {
-	// A path argument is resolved against the working directory, not this file.
+	// a path argument resolves against the working directory, not this file
 	const arg = process.argv[2] || 'jsonc-parser';
 	const j = require(/^[./]/.test(arg) ? require('path').resolve(arg) : arg);
 	const isASCII = (s) => !/[^\x00-\x7f]/.test(s);
@@ -135,8 +130,8 @@ function main() {
 		}
 	}
 
-	// Header line first, so the Go side can pin the upstream version and
-	// notice a truncated file.
+	// header first, so the Go side can pin the upstream version and notice a
+	// truncated file
 	process.stdout.write(JSON.stringify({
 		upstream: UPSTREAM_VERSION,
 		generator: 'testdata/gen_format_golden.js',

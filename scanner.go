@@ -10,7 +10,7 @@ import (
 type SyntaxKind int
 
 const (
-	// Unknown is the zero value: a character the scanner could not classify.
+	// Unknown is a character the scanner couldn't classify.
 	Unknown SyntaxKind = iota
 	OpenBrace
 	CloseBrace
@@ -44,8 +44,8 @@ func (k SyntaxKind) String() string {
 	return syntaxKindNames[k]
 }
 
-// ScanError describes a problem with the token the scanner just produced.
-// The scanner still produces a token and a value; it does not stop.
+// ScanError is a problem with the last token; the token and its value are
+// still usable.
 type ScanError int
 
 const (
@@ -83,11 +83,11 @@ func IgnoreTrivia() ScannerOption {
 	return func(c *scannerConfig) { c.ignoreTrivia = true }
 }
 
-// Scanner tokenizes a JSONC document. It is stateful and not safe for
-// concurrent use. All offsets are byte offsets into the text.
+// Scanner tokenizes a JSONC document. Offsets are bytes. Not safe for
+// concurrent use.
 type Scanner struct {
 	text string
-	pos  int // byte offset of the next character to read
+	pos  int // next byte to read
 
 	token       SyntaxKind
 	tokenOffset int
@@ -95,8 +95,7 @@ type Scanner struct {
 	value       string
 	err         ScanError
 
-	// Line tracking is incremental: these advance as line terminators are
-	// consumed, so StartColumn is O(1) rather than a rescan.
+	// Advanced as terminators are consumed, so StartColumn is O(1).
 	lineNumber      int
 	lineStartOffset int
 
@@ -115,42 +114,36 @@ func NewScanner(text string, opts ...ScannerOption) *Scanner {
 	return &Scanner{text: text, ignoreTrivia: c.ignoreTrivia}
 }
 
-// Token returns the kind of the most recently scanned token.
+// Token returns the kind of the last scanned token.
 func (s *Scanner) Token() SyntaxKind { return s.token }
 
-// Value returns the raw text of the most recently scanned token.
+// Value returns the last token's text; decoded for a string, raw otherwise.
 func (s *Scanner) Value() string { return s.value }
 
-// Offset returns the byte offset where the most recently scanned token starts.
+// Offset returns where the last token starts.
 func (s *Scanner) Offset() int { return s.tokenOffset }
 
-// Length returns the byte length of the most recently scanned token.
+// Length returns the last token's length in bytes.
 func (s *Scanner) Length() int { return s.tokenLength }
 
-// Position returns the byte offset the scanner will read from next.
+// Position returns the offset the scanner reads from next.
 func (s *Scanner) Position() int { return s.pos }
 
-// TokenError returns the scan error, if any, for the most recently scanned token.
+// TokenError returns the last token's scan error, if any.
 func (s *Scanner) TokenError() ScanError { return s.err }
 
-// StartLine returns the 0-based line number on which the most recently
-// scanned token starts.
+// StartLine returns the 0-based line the last token starts on.
 func (s *Scanner) StartLine() int { return s.tokenLineNumber }
 
-// StartColumn is the 0-based byte offset of the token from the start of its line.
+// StartColumn returns the last token's 0-based byte offset within its line.
 func (s *Scanner) StartColumn() int { return s.tokenOffset - s.tokenLineStartOffset }
 
-// SetPosition moves the scanner to a byte offset and resets token state.
+// SetPosition moves the scanner to pos (negative clamps to 0) and resets
+// token state. Line tracking is recounted from the start of the text, so it's
+// linear in pos; not meant for tight loops.
 //
-// Line and column tracking is recomputed for the new position by counting the
-// line terminators before it, so StartLine and StartColumn stay absolute and
-// correct after a jump. That costs one linear scan of the text up to pos;
-// SetPosition is not meant for tight loops over a large document.
-//
-// node-jsonc-parser leaves its line counters untouched here, which lets a
-// backward jump report a stale line and a NEGATIVE column. This port fixes
-// that: a column is a byte count from the start of a line and can never be
-// negative.
+// Upstream leaves its line counters alone here, so a backward jump can report
+// a stale line and a negative column; this doesn't.
 func (s *Scanner) SetPosition(pos int) {
 	pos = max(pos, 0)
 	s.pos = pos
@@ -265,9 +258,8 @@ func (s *Scanner) scanNext() SyntaxKind {
 					s.token = NumericLiteral
 					break
 				}
-				// A bare "-" with no digits is not a number. Advance
-				// past it: a token of zero length would make every
-				// `for k := s.Scan(); k != EOF` loop spin forever.
+				// A bare "-" still has to advance; a zero-length token
+				// spins every Scan loop forever.
 				s.pos += runeLenAt(s.text, s.pos)
 				s.token = Unknown
 				s.err = ScanInvalidCharacter
@@ -298,16 +290,14 @@ func (s *Scanner) scanNext() SyntaxKind {
 	}
 
 	s.tokenLength = s.pos - s.tokenOffset
-	// String values are decoded in scanString; every other token's value is
-	// its raw source text, sliced without allocating.
+	// scanString already set the decoded value.
 	if s.token != StringLiteral {
 		s.value = s.text[s.tokenOffset:s.pos]
 	}
 	return s.token
 }
 
-// scanLineBreaks consumes a run of line terminators, updating line tracking.
-// \r\n counts as one line break.
+// scanLineBreaks consumes a run of terminators; \r\n counts as one.
 func (s *Scanner) scanLineBreaks() {
 	for s.pos < len(s.text) && isLineBreak(s.text[s.pos]) {
 		if s.text[s.pos] == '\r' && s.pos+1 < len(s.text) && s.text[s.pos+1] == '\n' {
@@ -319,8 +309,7 @@ func (s *Scanner) scanLineBreaks() {
 	}
 }
 
-// scanBlockCommentBody consumes a block comment body (s.pos is just past the
-// opening "/*"), updating line tracking for any line terminators inside it.
+// scanBlockCommentBody consumes everything after the opening "/*".
 func (s *Scanner) scanBlockCommentBody() {
 	for s.pos < len(s.text) {
 		c := s.text[s.pos]
@@ -340,8 +329,7 @@ func (s *Scanner) scanBlockCommentBody() {
 func isWhitespace(c byte) bool { return c == ' ' || c == '\t' || c == '\v' || c == '\f' }
 func isLineBreak(c byte) bool  { return c == '\n' || c == '\r' }
 
-// runeLenAt returns the byte length of the rune starting at i, always >= 1 so
-// scanning cannot stall on invalid UTF-8.
+// runeLenAt is never 0, so invalid UTF-8 can't stall the scanner.
 func runeLenAt(s string, i int) int {
 	_, n := utf8.DecodeRuneInString(s[i:])
 	if n == 0 {
@@ -350,14 +338,12 @@ func runeLenAt(s string, i int) int {
 	return n
 }
 
-// scanString consumes a quoted string starting at the opening quote and
-// returns its decoded value. It sets s.err on malformed input but always
-// returns a usable value, matching upstream's behavior of reporting an error
-// alongside a result rather than bailing.
+// scanString returns the decoded string at s.pos. Malformed input sets s.err
+// but still returns a value, as upstream does.
 func (s *Scanner) scanString() string {
 	s.pos++ // opening quote
 	start := s.pos
-	var b *strings.Builder // allocated only when an escape is found
+	var b *strings.Builder // only allocated once there's an escape
 
 	for {
 		if s.pos >= len(s.text) {
@@ -371,17 +357,15 @@ func (s *Scanner) scanString() string {
 			s.pos++ // closing quote
 			return out
 		case isLineBreak(c):
-			// An unescaped line break terminates the string.
+			// an unescaped line break ends the string
 			s.err = ScanUnexpectedEndOfString
 			return s.flush(b, start)
 		case c == '\\':
 			if b == nil {
 				b = &strings.Builder{}
 			}
-			// Flush the literal run since the last escape (or since the
-			// opening quote). This must happen on EVERY escape, not only the
-			// first: start is reset to just past each escape, so skipping the
-			// flush silently drops the text between consecutive escapes.
+			// Flush on every escape, not just the first; otherwise the text
+			// between two escapes is dropped.
 			b.WriteString(s.text[start:s.pos])
 			s.pos++
 			if s.pos >= len(s.text) {
@@ -396,8 +380,8 @@ func (s *Scanner) scanString() string {
 	}
 }
 
-// flush returns the builder's contents, or a zero-copy slice of the input when
-// no escape was ever encountered.
+// flush returns the decoded string, or a slice of the input if there were no
+// escapes.
 func (s *Scanner) flush(b *strings.Builder, start int) string {
 	if b == nil {
 		return s.text[start:s.pos]
@@ -406,8 +390,7 @@ func (s *Scanner) flush(b *strings.Builder, start int) string {
 	return b.String()
 }
 
-// writeEscape consumes one escape sequence (s.pos is just past the backslash)
-// and writes its value to b.
+// writeEscape decodes the escape after a backslash into b.
 func (s *Scanner) writeEscape(b *strings.Builder) {
 	c := s.text[s.pos]
 	s.pos++
@@ -436,7 +419,7 @@ func (s *Scanner) writeEscape(b *strings.Builder) {
 			return
 		}
 		if utf16.IsSurrogate(rune(r)) {
-			// Try to pair it with a following \uXXXX.
+			// pair it with a following \uXXXX, if there is one
 			if s.pos+1 < len(s.text) && s.text[s.pos] == '\\' && s.text[s.pos+1] == 'u' {
 				save := s.pos
 				s.pos += 2
@@ -459,14 +442,10 @@ func (s *Scanner) writeEscape(b *strings.Builder) {
 	}
 }
 
-// scanHex4 reads up to four hex digits, advancing s.pos past however many
-// valid hex digits it finds and reporting ok=false if fewer than four were
-// found. s.pos always stops at the first non-hex character (or end of text)
-// rather than jumping past it, so a truncated escape like "\u00" (followed
-// immediately by the closing quote) leaves the scanner positioned AT that
-// quote instead of overshooting past it — otherwise the enclosing string
-// scan would run off the end of the text and report
-// ScanUnexpectedEndOfString instead of ScanInvalidUnicode.
+// scanHex4 reads up to four hex digits and stops on the first non-hex byte.
+// Stopping there matters; "\u00" right before the closing quote has to leave
+// s.pos on the quote, or the string runs off the end and reports the wrong
+// error.
 func (s *Scanner) scanHex4() (int, bool) {
 	v := 0
 	digits := 0
@@ -497,9 +476,8 @@ func hexVal(c byte) int {
 	return -1
 }
 
-// scanNumber consumes a JSON number and returns its raw source text. It
-// returns ok=false when there is no number at all (a bare "-"). A truncated
-// number such as "1e" returns the text with s.err set, matching upstream.
+// scanNumber returns the number at s.pos, or ok=false for a bare "-". A
+// truncated number like "1e" comes back with s.err set, as upstream does.
 func (s *Scanner) scanNumber() (string, bool) {
 	start := s.pos
 	if s.pos < len(s.text) && s.text[s.pos] == '-' {
