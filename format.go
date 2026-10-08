@@ -28,6 +28,7 @@ type FormatOptions struct {
 
 	// InsertFinalNewline ends a document that has at least one token with
 	// exactly one EOL. Without it, trailing whitespace is removed entirely.
+	// KeepLines overrides both: trailing line breaks the author wrote are kept.
 	InsertFinalNewline bool
 
 	// KeepLines preserves the author's line breaks, blank lines included, and
