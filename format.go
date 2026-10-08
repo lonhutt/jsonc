@@ -7,13 +7,6 @@ type Range struct {
 	Offset, Length int
 }
 
-// Edit replaces Length bytes at Offset with Content. An Edit with Length 0 is
-// an insertion; one with empty Content is a deletion.
-type Edit struct {
-	Offset, Length int
-	Content        string
-}
-
 // FormatOptions controls Format. The zero value is usable: TabSize 0 means 4,
 // and an empty EOL means the terminator is taken from the document.
 type FormatOptions struct {

@@ -12,16 +12,10 @@ import (
 	"testing"
 )
 
-// applyEditsForTest is a local, deliberately simple applier so format tests do
-// not depend on Task 12's ApplyEdits. Replace its body with a call to
-// ApplyEdits once Task 12 lands.
+// applyEditsForTest runs every format test's edits through the real
+// ApplyEdits, so an overlapping or out-of-bounds edit from Format fails there.
 func applyEditsForTest(text string, edits []Edit) (string, error) {
-	out := text
-	for i := len(edits) - 1; i >= 0; i-- {
-		e := edits[i]
-		out = out[:e.Offset] + e.Content + out[e.Offset+e.Length:]
-	}
-	return out, nil
+	return ApplyEdits(text, edits)
 }
 
 func spaces2() FormatOptions {
