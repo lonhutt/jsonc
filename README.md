@@ -1,6 +1,7 @@
 # jsonc
 
 [![CI](https://github.com/lonhutt/jsonc/actions/workflows/ci.yml/badge.svg)](https://github.com/lonhutt/jsonc/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/lonhutt/jsonc.svg)](https://pkg.go.dev/github.com/lonhutt/jsonc)
 
 A Go library for JSON with comments (JSONC), the format VS Code settings and
 `tsconfig.json` use. It's a port of Microsoft's
