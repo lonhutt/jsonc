@@ -211,7 +211,12 @@ func setArrayElement(text string, parent *Node, index int, value any, remove boo
 		var e Edit
 		switch {
 		case n == 1:
-			e = Edit{Offset: parent.Offset + 1, Length: parent.Length - 2}
+			// everything between the brackets; upstream assumes the "]" is there
+			end := parent.Offset + parent.Length
+			if text[end-1] == ']' {
+				end--
+			}
+			e = Edit{Offset: parent.Offset + 1, Length: end - parent.Offset - 1}
 		case index == n-1:
 			// Upstream stops 2 bytes before the array's end, assuming "\n]";
 			// that keeps the last digit of `[1,2]` and cuts into a comment

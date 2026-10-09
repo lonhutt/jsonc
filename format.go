@@ -150,12 +150,13 @@ func Format(text string, r *Range, o FormatOptions) []Edit {
 	return f.edits
 }
 
-// lineStart returns the start of offset's line, moved back to the start of a
-// token the line would cut off: one it starts inside (a block comment, or a
-// string an escaped line break keeps going), which scanning from mid-token
-// misreads, or an unterminated string ending right there, whose line break
-// mustn't be collapsed. Upstream does neither.
+// lineStart returns where a range's scan starts: the start of offset's line,
+// or earlier when a token reaches across it.
 func lineStart(text string, offset int) int {
+	// Upstream scans from the line start even when that's inside a block
+	// comment or a string an escaped line break keeps going, and misreads
+	// the token's tail. It also cuts off an unterminated string ending right
+	// there, whose line break then gets collapsed.
 	for {
 		for offset > 0 && !isLineBreak(text[offset-1]) {
 			offset--

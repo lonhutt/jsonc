@@ -780,3 +780,12 @@ func TestModifyNegativeIndexInNewArray(t *testing.T) {
 	}
 	assertModify(t, `{}`, Path{"a", -1}, 1, ModifyOptions{}, `{"a": [1]}`)
 }
+
+// With no closing ']', the 2 bytes upstream takes off for "[" and "]" eat the
+// element instead: `["xy"` became `["`, and `[1` was a silent no-op.
+func TestRemoveOnlyElementOfUnclosedArray(t *testing.T) {
+	assertRemove(t, `["xy"`, Path{0}, ModifyOptions{}, `[`)
+	assertRemove(t, `[1`, Path{0}, ModifyOptions{}, `[`)
+	assertRemove(t, `{"a": ["x"`, Path{"a", 0}, ModifyOptions{}, `{"a": [`)
+	assertRemove(t, `[1]`, Path{0}, ModifyOptions{}, `[]`)
+}

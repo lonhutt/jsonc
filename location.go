@@ -165,5 +165,5 @@ func visitUntilStopped(text string, v Visitor) {
 			panic(r)
 		}
 	}()
-	Visit(text, v)
+	visit(text, v, false)
 }

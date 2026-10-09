@@ -450,11 +450,11 @@ func (s *Scanner) writeEscape(b *strings.Builder) {
 	}
 }
 
-// scanHex4 reads up to four hex digits and stops on the first non-hex byte.
-// Stopping there matters; "\u00" right before the closing quote has to leave
-// s.pos on the quote, or the string runs off the end and reports the wrong
-// error.
+// scanHex4 reads the four hex digits of a \u escape; ok is false if there
+// aren't four.
 func (s *Scanner) scanHex4() (int, bool) {
+	// Stop on the first non-hex byte: "\u00" right before the closing quote
+	// has to leave s.pos on the quote, or the string runs off the end.
 	v := 0
 	digits := 0
 	for digits < 4 && s.pos < len(s.text) {

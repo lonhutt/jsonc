@@ -1,5 +1,7 @@
 package jsonc
 
+import "slices"
+
 // NodeType is the kind of a Node in the parse tree.
 type NodeType string
 
@@ -31,57 +33,91 @@ type Node struct {
 
 // Value returns the subtree as Parse would; upstream's getNodeValue.
 func (n *Node) Value() any {
-	if n == nil {
-		return nil
+	// a stack rather than recursion, so a deep tree can't overflow the call
+	// stack; Go can't recover from that
+	type frame struct {
+		node *Node
+		next int
+		key  string // the member being built, in an object
+		obj  map[string]any
+		arr  []any
 	}
-	switch n.Type {
-	case NodeObject:
-		m := make(map[string]any, len(n.Children))
-		for _, prop := range n.Children {
-			if len(prop.Children) != 2 {
+	var stack []frame
+	add := func(f *frame, v any) {
+		if f.obj != nil {
+			f.obj[f.key] = v
+		} else {
+			f.arr = append(f.arr, v)
+		}
+	}
+	// enter returns a scalar's value, or opens a frame for a container; a
+	// property stands for its value
+	enter := func(n *Node) (any, bool) {
+		for n != nil && n.Type == NodeProperty {
+			if len(n.Children) != 2 {
+				return nil, true
+			}
+			n = n.Children[1]
+		}
+		switch {
+		case n == nil:
+			return nil, true
+		case n.Type == NodeObject:
+			stack = append(stack, frame{node: n, obj: make(map[string]any, len(n.Children))})
+		case n.Type == NodeArray:
+			stack = append(stack, frame{node: n, arr: make([]any, 0, len(n.Children))})
+		default:
+			return n.Literal, true
+		}
+		return nil, false
+	}
+
+	v, done := enter(n)
+	for !done {
+		f := &stack[len(stack)-1]
+		if f.next == len(f.node.Children) {
+			if f.obj != nil {
+				v = f.obj
+			} else {
+				v = f.arr
+			}
+			stack = stack[:len(stack)-1]
+			if done = len(stack) == 0; !done {
+				add(&stack[len(stack)-1], v)
+			}
+			continue
+		}
+		child := f.node.Children[f.next]
+		f.next++
+		if f.obj != nil {
+			key, ok := child.Children[0].Literal.(string)
+			if len(child.Children) != 2 || !ok {
 				continue // incomplete property
 			}
-			key, ok := prop.Children[0].Literal.(string)
-			if !ok {
-				continue
-			}
-			m[key] = prop.Children[1].Value()
+			f.key = key
+			child = child.Children[1]
 		}
-		return m
-	case NodeArray:
-		out := make([]any, 0, len(n.Children))
-		for _, c := range n.Children {
-			out = append(out, c.Value())
+		if cv, scalar := enter(child); scalar {
+			add(f, cv)
 		}
-		return out
-	case NodeProperty:
-		if len(n.Children) == 2 {
-			return n.Children[1].Value()
-		}
-		return nil
-	default:
-		return n.Literal
 	}
+	return v
 }
 
 // Path returns the path from the root to n; upstream's getNodePath.
 func (n *Node) Path() Path {
-	if n == nil || n.Parent == nil {
-		return Path{}
-	}
-	parentPath := n.Parent.Path()
-	switch n.Parent.Type {
-	case NodeProperty:
-		key, _ := n.Parent.Children[0].Literal.(string)
-		return append(parentPath, key)
-	case NodeArray:
-		for i, c := range n.Parent.Children {
-			if c == n {
-				return append(parentPath, i)
-			}
+	path := Path{}
+	for ; n != nil && n.Parent != nil; n = n.Parent {
+		switch n.Parent.Type {
+		case NodeProperty:
+			key, _ := n.Parent.Children[0].Literal.(string)
+			path = append(path, key)
+		case NodeArray:
+			path = append(path, slices.Index(n.Parent.Children, n))
 		}
 	}
-	return parentPath
+	slices.Reverse(path)
+	return path
 }
 
 // ParseTree parses text into a tree that keeps offsets and key order. It's
@@ -126,7 +162,7 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 		return &Node{Type: t, Offset: s.Offset, Length: s.Length, ColonOffset: -1}
 	}
 
-	Visit(text, Visitor{
+	visit(text, Visitor{
 		OnObjectBegin: func(s Span) bool {
 			current = attach(newNode(NodeObject, s))
 			return true
@@ -175,7 +211,7 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 				StartLine: s.StartLine, StartCol: s.StartCol,
 			})
 		},
-	}, opts...)
+	}, false, opts...)
 
 	return root, errs
 }

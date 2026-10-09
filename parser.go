@@ -29,6 +29,7 @@ const (
 	InvalidUnicode
 	InvalidEscapeCharacter
 	InvalidCharacter
+	parseErrorCodeEnd // one past the last; not a code
 )
 
 var parseErrorCodeNames = [...]string{
@@ -39,8 +40,9 @@ var parseErrorCodeNames = [...]string{
 	"InvalidUnicode", "InvalidEscapeCharacter", "InvalidCharacter",
 }
 
-// Fails to compile if a code is added without a name.
-var _ = parseErrorCodeNames[InvalidCharacter-1]
+// Fails to compile unless every code has exactly one name: the index is 0 only
+// when the counts match, and anything else is out of range for [1].
+var _ = [1]struct{}{}[len(parseErrorCodeNames)-int(parseErrorCodeEnd-1)]
 
 // String returns the code's name; upstream's printParseErrorCode.
 func (c ParseErrorCode) String() string {
@@ -157,10 +159,12 @@ type Visitor struct {
 }
 
 type visitState struct {
-	s    *Scanner
-	v    Visitor
-	cfg  parseConfig
-	path *pathNode // where parsing is; nil at the top
+	s        *Scanner
+	v        Visitor
+	cfg      parseConfig
+	path     *pathNode // where parsing is; nil at the top
+	withPath bool
+	open     []container
 	// skipped counts the open containers inside one a Begin callback skipped.
 	skipped int
 }
@@ -190,10 +194,17 @@ func (st *visitState) end(cb func(Span)) {
 // Visit parses text, calling v's callbacks as it goes. Errors go to v.OnError
 // and parsing continues; it returns false only when there's no value at all.
 func Visit(text string, v Visitor, opts ...ParseOption) bool {
+	return visit(text, v, true, opts...)
+}
+
+// visit is Visit; Parse, ParseTree and GetLocation pass withPath false, since
+// they never read Span.Path and building it costs an allocation per member.
+func visit(text string, v Visitor, withPath bool, opts ...ParseOption) bool {
 	st := &visitState{
-		s:   NewScanner(text),
-		v:   v,
-		cfg: newParseConfig(opts),
+		s:        NewScanner(text),
+		v:        v,
+		cfg:      newParseConfig(opts),
+		withPath: withPath,
 	}
 
 	st.scanNext()
@@ -276,18 +287,108 @@ func (st *visitState) handleError(code ParseErrorCode, skipUntil ...SyntaxKind) 
 	}
 }
 
+// container is an open object or array on parseValue's stack.
+type container struct {
+	array      bool
+	needsComma bool
+	index      int // array element, -1 before the first
+}
+
+// parseValue parses one value. Open containers go on st.open rather than the
+// call stack, since Go can't recover from a stack overflow and upstream's
+// recursion would hit one on deeply nested input.
 func (st *visitState) parseValue() bool {
+	if ok, opened := st.openValue(); !opened {
+		return ok
+	}
+	for len(st.open) > 0 {
+		c := &st.open[len(st.open)-1]
+		closer := CloseBrace
+		if c.array {
+			closer = CloseBracket
+		}
+		if st.s.Token() == closer || st.s.Token() == EOF {
+			st.close()
+			continue
+		}
+		if st.s.Token() == Comma {
+			if !c.needsComma {
+				st.handleError(ValueExpected)
+			}
+			st.separator(",")
+			st.scanNext()
+			if st.s.Token() == closer && st.cfg.allowTrailingComma {
+				st.close()
+				continue
+			}
+		} else if c.needsComma {
+			st.handleError(CommaExpected)
+		}
+		c.needsComma = true
+		if c.array {
+			st.parseElement(c)
+		} else {
+			st.parseProperty()
+		}
+	}
+	return true
+}
+
+// openValue starts a container, or parses a literal; ok is false when there's
+// no value there.
+func (st *visitState) openValue() (ok, opened bool) {
 	switch st.s.Token() {
 	case OpenBracket:
-		return st.parseArray()
+		st.begin(st.v.OnArrayBegin)
+		st.scanNext()
+		st.open = append(st.open, container{array: true, index: -1})
+		return true, true
 	case OpenBrace:
-		return st.parseObject()
-	case StringLiteral:
-		// same as default; kept so this diffs cleanly against upstream's
-		// parseString(true)
-		return st.parseLiteral()
-	default:
-		return st.parseLiteral()
+		st.begin(st.v.OnObjectBegin)
+		st.scanNext()
+		st.open = append(st.open, container{})
+		return true, true
+	}
+	return st.parseLiteral(), false
+}
+
+func (st *visitState) pushPath(seg any) {
+	if st.withPath {
+		st.path = st.path.push(seg)
+	}
+}
+
+func (st *visitState) popPath() {
+	if st.withPath {
+		st.path = st.path.parent
+	}
+}
+
+// close ends the innermost container.
+func (st *visitState) close() {
+	c := st.open[len(st.open)-1]
+	st.open = st.open[:len(st.open)-1]
+	if c.array {
+		if c.index >= 0 {
+			st.popPath()
+		}
+		st.end(st.v.OnArrayEnd)
+		if st.s.Token() != CloseBracket {
+			st.handleError(CloseBracketExpected)
+		} else {
+			st.scanNext()
+		}
+	} else {
+		st.end(st.v.OnObjectEnd)
+		if st.s.Token() != CloseBrace {
+			st.handleError(CloseBraceExpected)
+		} else {
+			st.scanNext()
+		}
+	}
+	// a container inside an object was a property's value, which ends here
+	if n := len(st.open); n > 0 && !st.open[n-1].array {
+		st.popPath()
 	}
 }
 
@@ -349,106 +450,48 @@ func (st *visitState) separator(sep string) {
 	}
 }
 
-func (st *visitState) parseProperty() bool {
+// parseProperty parses one member of the innermost object. If its value is a
+// container, close ends the property instead.
+func (st *visitState) parseProperty() {
 	if st.s.Token() != StringLiteral {
 		st.handleError(PropertyNameExpected, CloseBrace, Comma)
-		return false
+		st.handleError(ValueExpected, CloseBrace, Comma)
+		return
 	}
 	name := st.s.Value()
 	if st.v.OnObjectProperty != nil && st.skipped == 0 {
 		st.v.OnObjectProperty(name, st.span())
 	}
 	// after the property event, which gets the object's path, as upstream
-	st.path = st.path.push(name)
+	st.pushPath(name)
 	st.scanNext()
 
 	if st.s.Token() == Colon {
 		st.separator(":")
 		st.scanNext()
-		if !st.parseValue() {
+		ok, opened := st.openValue()
+		if opened {
+			return
+		}
+		if !ok {
 			st.handleError(ValueExpected, CloseBrace, Comma)
 		}
 	} else {
 		st.handleError(ColonExpected, CloseBrace, Comma)
 	}
-	st.path = st.path.parent
-	return true
+	st.popPath()
 }
 
-func (st *visitState) parseObject() bool {
-	st.begin(st.v.OnObjectBegin)
-	st.scanNext()
-
-	needsComma := false
-	for st.s.Token() != CloseBrace && st.s.Token() != EOF {
-		if st.s.Token() == Comma {
-			if !needsComma {
-				st.handleError(ValueExpected)
-			}
-			st.separator(",")
-			st.scanNext()
-			if st.s.Token() == CloseBrace && st.cfg.allowTrailingComma {
-				break
-			}
-		} else if needsComma {
-			st.handleError(CommaExpected)
-		}
-		if !st.parseProperty() {
-			st.handleError(ValueExpected, CloseBrace, Comma)
-		}
-		needsComma = true
-	}
-
-	st.end(st.v.OnObjectEnd)
-	if st.s.Token() != CloseBrace {
-		st.handleError(CloseBraceExpected)
-	} else {
-		st.scanNext()
-	}
-	return true
-}
-
-func (st *visitState) parseArray() bool {
-	st.begin(st.v.OnArrayBegin)
-	st.scanNext()
-
+// parseElement parses one element of the innermost array.
+func (st *visitState) parseElement(c *container) {
 	// the index goes on the path at the first element, as upstream
-	index := -1
-	needsComma := false
-	for st.s.Token() != CloseBracket && st.s.Token() != EOF {
-		if st.s.Token() == Comma {
-			if !needsComma {
-				st.handleError(ValueExpected)
-			}
-			st.separator(",")
-			st.scanNext()
-			if st.s.Token() == CloseBracket && st.cfg.allowTrailingComma {
-				break
-			}
-		} else if needsComma {
-			st.handleError(CommaExpected)
-		}
-		if index++; index == 0 {
-			st.path = st.path.push(0)
-		} else {
-			st.path = st.path.parent.push(index)
-		}
-		if !st.parseValue() {
-			st.handleError(ValueExpected, CloseBracket, Comma)
-		}
-		needsComma = true
+	if c.index++; c.index > 0 {
+		st.popPath()
 	}
-
-	if index >= 0 {
-		st.path = st.path.parent
+	st.pushPath(c.index)
+	if ok, opened := st.openValue(); !opened && !ok {
+		st.handleError(ValueExpected, CloseBracket, Comma)
 	}
-	st.end(st.v.OnArrayEnd)
-	if st.s.Token() != CloseBracket {
-		st.handleError(CloseBracketExpected)
-	} else {
-		st.scanNext()
-	}
-	return true
 }
 
 // Parse returns the value of text as json.Unmarshal into an any would:
@@ -496,7 +539,7 @@ func Parse(text string, opts ...ParseOption) (any, []ParseError) {
 		set(done)
 	}
 
-	Visit(text, Visitor{
+	visit(text, Visitor{
 		OnObjectBegin: func(Span) bool {
 			push(map[string]any{})
 			keys = append(keys, "")
@@ -529,7 +572,7 @@ func Parse(text string, opts ...ParseOption) (any, []ParseError) {
 				StartCol:  s.StartCol,
 			})
 		},
-	}, opts...)
+	}, false, opts...)
 
 	if !hasRoot {
 		return nil, errs
