@@ -42,3 +42,42 @@ jobs:
         with:
           go-version: stable
       - run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime=30s ./...
+
+  # Every push to main that passes is a release: the newest vX.Y.Z tag with the
+  # patch bumped, or v0.0.1 for the first. For a minor or major bump, push that
+  # tag by hand; the next release counts up from it.
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, staticcheck, fuzz]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # two quick pushes mustn't both take the same version
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Pick the next version
+        id: version
+        run: |
+          if [ -n "$(git tag --points-at HEAD)" ]; then
+            echo "HEAD is already tagged; nothing to release"
+            exit 0
+          fi
+          # plain vX.Y.Z only; a pre-release tag like v1.0.0-rc1 doesn't count
+          last=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
+          if [ -z "$last" ]; then
+            next=v0.0.1
+          else
+            IFS=. read -r major minor patch <<<"${last#v}"
+            next="v$major.$minor.$((patch + 1))"
+          fi
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+      - name: Tag and release
+        if: steps.version.outputs.next != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ steps.version.outputs.next }}" --target "$GITHUB_SHA" --generate-notes
