@@ -153,7 +153,11 @@ func (s *Scanner) SetPosition(pos int) {
 	s.lineStartOffset = 0
 	for i := 0; i < pos && i < len(s.text); i++ {
 		if s.text[i] == '\r' {
-			if i+1 < pos && i+1 < len(s.text) && s.text[i+1] == '\n' {
+			if i+1 < len(s.text) && s.text[i+1] == '\n' {
+				// landing between the two, Scan counts the "\n"
+				if i+1 == pos {
+					break
+				}
 				i++
 			}
 			s.lineNumber++

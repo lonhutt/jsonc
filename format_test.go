@@ -1251,3 +1251,17 @@ func TestFormatRangeFinalNewlineOnlyAtTheEnd(t *testing.T) {
 		t.Errorf("Modify: got %q, want %q", got, want)
 	}
 }
+
+// The range [-10,-5) holds no text, so there's nothing to format; clamping
+// only the start used to turn it into [0,5). Upstream gives no edits.
+func TestFormatRangeBeforeTheText(t *testing.T) {
+	if got := Format(`{"a":1,"b":2}`, &Range{Offset: -10, Length: 5}, DefaultFormatOptions()); len(got) != 0 {
+		t.Errorf("got %+v, want no edits", got)
+	}
+	in := `{"a":1}`
+	got, _ := applyEditsForTest(in, Format(in, &Range{Offset: -3, Length: 5}, spaces2()))
+	want, _ := applyEditsForTest(in, Format(in, &Range{Offset: 0, Length: 2}, spaces2()))
+	if got != want {
+		t.Errorf("[-3,2) gave %q, want the same as [0,2), %q", got, want)
+	}
+}

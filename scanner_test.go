@@ -432,3 +432,14 @@ func TestScanEscapedLineBreakCountsTheLine(t *testing.T) {
 		}
 	}
 }
+
+// Landing between \r and \n mustn't count the line twice.
+func TestSetPositionMidCRLF(t *testing.T) {
+	s := NewScanner("a\r\nb")
+	s.SetPosition(2)
+	for k := s.Scan(); k != EOF; k = s.Scan() {
+		if k == Unknown && (s.StartLine() != 1 || s.StartColumn() != 0) {
+			t.Errorf("b at line %d, column %d; want 1, 0", s.StartLine(), s.StartColumn())
+		}
+	}
+}

@@ -14,8 +14,9 @@ func TestStripComments(t *testing.T) {
 		// // inside a string isn't a comment
 		{`{"a":"http://x"}`, `{"a":"http://x"}`},
 		{`{"a":"/* not a comment */"}`, `{"a":"/* not a comment */"}`},
-		// a multi-line block comment keeps its line breaks
-		{"{/* a\nb */}", "{\n}"},
+		// the whole comment goes, line breaks too, as upstream
+		{"{/* a\nb */}", "{}"},
+		{"{/* a\r\nb */}", "{}"},
 	}
 	for _, tc := range tests {
 		if got := StripComments(tc.in); got != tc.want {
@@ -54,17 +55,6 @@ func TestReplaceCommentsPreservesLineBreaks(t *testing.T) {
 	}
 	if got[5] != '\n' {
 		t.Errorf("line break at offset 5 was replaced; got %q", got[5])
-	}
-}
-
-func TestStripCommentsCRLF(t *testing.T) {
-	// a CRLF inside a block comment keeps both bytes, or later line numbers
-	// shift
-	in := "{/* a\r\nb */}"
-	got := StripComments(in)
-	want := "{\r\n}"
-	if got != want {
-		t.Errorf("StripComments(%q) = %q, want %q", in, got, want)
 	}
 }
 

@@ -3,7 +3,8 @@
 // as "remove": true). TestModifyGoldenCorpus replays it, so Modify and Remove
 // can't drift from upstream without failing `go test`, and no node is needed.
 //
-// Regenerate it with format-golden.jsonl; see README.md.
+// Regenerate it alongside format-golden.jsonl, the same way; the steps are at
+// the top of gen_format_golden.js.
 
 'use strict';
 

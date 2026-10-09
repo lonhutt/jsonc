@@ -2,9 +2,8 @@ package jsonc
 
 import "strings"
 
-// StripComments removes comments from text. Line breaks inside block comments
-// stay, so line numbers don't shift. Comment syntax inside a string is left
-// alone.
+// StripComments removes comments from text, line breaks inside them too.
+// ReplaceComments keeps offsets and lines.
 func StripComments(text string) string {
 	return stripOrReplace(text, 0, false)
 }
@@ -30,10 +29,13 @@ func stripOrReplace(text string, ch rune, replace bool) string {
 			b.WriteString(text[start:end])
 			continue
 		}
+		if !replace {
+			continue
+		}
 		for i := start; i < end; i++ {
 			if isLineBreak(text[i]) {
 				b.WriteByte(text[i])
-			} else if replace {
+			} else {
 				b.WriteRune(ch)
 			}
 		}

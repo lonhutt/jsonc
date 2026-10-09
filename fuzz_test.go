@@ -49,6 +49,26 @@ func FuzzParse(f *testing.F) {
 				t.Fatalf("error out of bounds for %d bytes: %+v", len(text), e)
 			}
 		}
+		// A property never opens while another is still open, since Visit's
+		// recovery always stops at ',', '}' or EOF; if it did, the new one
+		// would land inside the old one.
+		root, _ := ParseTree(text)
+		var check func(n *Node)
+		check = func(n *Node) {
+			if n.Type == NodeProperty && (len(n.Children) == 0 || len(n.Children) > 2 || n.Children[0].Type != NodeString) {
+				t.Fatalf("ParseTree(%q): property at %d has children %v", text, n.Offset, n.Children)
+			}
+			for _, c := range n.Children {
+				if c.Offset < n.Offset || c.Offset+c.Length > n.Offset+n.Length {
+					t.Fatalf("ParseTree(%q): %v at %d+%d outside its parent at %d+%d", text, c.Type, c.Offset, c.Length, n.Offset, n.Length)
+				}
+				check(c)
+			}
+		}
+		if root != nil {
+			check(root)
+		}
+
 		// encoding/json replaces invalid UTF-8 where we keep the bytes, so only
 		// compare valid text.
 		var want any

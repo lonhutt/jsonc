@@ -90,8 +90,13 @@ func Remove(text string, path Path, o ModifyOptions) ([]Edit, error) {
 // setProperty is upstream's setProperty; remove stands in for its undefined.
 func setProperty(text string, path Path, value any, remove bool, o ModifyOptions) ([]Edit, error) {
 	for i, seg := range path {
-		switch seg.(type) {
-		case string, int:
+		switch seg := seg.(type) {
+		case string:
+		case int:
+			// checked here too, so a missing array doesn't let it through
+			if seg < -1 {
+				return nil, fmt.Errorf("jsonc: path element %d is %d; an index can't be below -1", i, seg)
+			}
 		default:
 			return nil, fmt.Errorf("jsonc: path element %d is a %T; must be string or int", i, seg)
 		}

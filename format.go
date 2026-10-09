@@ -118,9 +118,20 @@ func Format(text string, r *Range, o FormatOptions) []Edit {
 	} else {
 		f.hasRange = true
 		f.rangeStart = clamp(r.Offset, 0, len(text))
-		// Clamp the length, not the sum; rangeStart + MaxInt wraps negative.
-		f.rangeEnd = f.rangeStart + clamp(r.Length, 0, len(text)-f.rangeStart)
-		f.pastEnd = r.Length > len(text)-f.rangeStart
+		// The end stays where the caller put it, so a start before the text
+		// doesn't move it. Offset+Length can wrap, so test the length against
+		// what's left instead of adding.
+		length, asked := max(r.Length, 0), 0
+		switch {
+		case r.Offset < 0:
+			asked = r.Offset + length
+		case length > len(text)-min(r.Offset, len(text)):
+			asked = len(text) + 1
+		default:
+			asked = r.Offset + length
+		}
+		f.rangeEnd = clamp(asked, f.rangeStart, len(text))
+		f.pastEnd = asked > len(text)
 
 		// Widen back to the line start; the starting indent comes from there, or a
 		// nested block would be re-indented as depth 0.
@@ -151,6 +162,11 @@ func lineStart(text string, offset int) int {
 		}
 		if offset == 0 {
 			return 0
+		}
+		// Only a block comment or an escaped line break lets a token reach
+		// across a line start; without either before it, skip the scan.
+		if before := text[:offset]; !strings.Contains(before, "/*") && !strings.Contains(before, "\\\n") && !strings.Contains(before, "\\\r") {
+			return offset
 		}
 		s := NewScanner(text)
 		k := s.Scan()

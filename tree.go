@@ -16,8 +16,8 @@ const (
 // Node is one node of the parse tree. Offsets are bytes. A tree doesn't change
 // after ParseTree returns, so concurrent reads are safe.
 //
-// A well-formed property has two children, key then value, and ColonOffset is
-// the ':' between them; -1 otherwise.
+// A well-formed property has two children, key then value. ColonOffset is a
+// property's ':', or -1 if it has none; one with a ':' can still lack a value.
 type Node struct {
 	Type NodeType
 	// Literal is a scalar's value; nil for objects, arrays and properties, which
@@ -132,10 +132,6 @@ func ParseTree(text string, opts ...ParseOption) (*Node, []ParseError) {
 			return true
 		},
 		OnObjectProperty: func(name string, s Span) {
-			// Unreachable today; Visit's recovery always stops at ',', '}' or
-			// EOF. Kept as a guard since a property left open silently
-			// corrupts the tree.
-			ensurePropertyComplete(s.Offset)
 			prop := attach(newNode(NodeProperty, s))
 			current = prop
 			key := newNode(NodeString, s)

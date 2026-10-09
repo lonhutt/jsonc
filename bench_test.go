@@ -42,3 +42,11 @@ func BenchmarkGetLocationNearStart(b *testing.B) {
 		GetLocation(benchDoc, 30)
 	}
 }
+
+func BenchmarkFormatRangeNearEnd(b *testing.B) {
+	b.ReportAllocs()
+	r := Range{Offset: len(benchDoc) - 20, Length: 10}
+	for b.Loop() {
+		Format(benchDoc, &r, DefaultFormatOptions())
+	}
+}

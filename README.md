@@ -49,7 +49,7 @@ fmt.Println(node.Literal, node.Offset) // 2 10
 ```
 
 `Visit` is the callback API both of these are built on; a `Begin` callback
-that returns false skips that container, as upstream. `NewScanner` gets you
+that returns false skips that container. `NewScanner` gets you
 the tokens.
 
 ## Editing
@@ -144,6 +144,9 @@ weren't worth copying.
   `InsertFinalNewline`, upstream adds a line break at the end of a range's
   last line wherever that is, which leaves a blank line mid-document; so does
   `Modify` with `Format`.
+- **Skipping a container counts its depth properly.** Upstream only counts
+  nested containers that have a `Begin` callback set, so skipping an array with
+  no `OnObjectBegin` ends early at the first nested object.
 - **An escaped line break counts as a line.** In a string, `\` before a line
   break keeps the string going; upstream doesn't count that line, so every
   later token's line is one short.
@@ -164,8 +167,8 @@ unmarshaling into structs; `StripComments` plus `encoding/json` covers that.
 
 Besides upstream's own tests, ported, the format and edit tests replay
 upstream's recorded answers for about 29,000 cases from `testdata/`, so this
-can't drift from node-jsonc-parser without a test failing. See
-[testdata/README.md](testdata/README.md). Four fuzz targets cover the offset
+can't drift from node-jsonc-parser without a test failing; how to regenerate
+them is at the top of `testdata/gen_format_golden.js`. Four fuzz targets cover the offset
 arithmetic, the format round trip, and modify-then-read-back.
 
 ## License

@@ -201,15 +201,15 @@ func Visit(text string, v Visitor, opts ...ParseOption) bool {
 		if st.cfg.allowEmptyContent {
 			return true
 		}
-		st.handleError(ValueExpected, nil, nil)
+		st.handleError(ValueExpected)
 		return false
 	}
 	if !st.parseValue() {
-		st.handleError(ValueExpected, nil, nil)
+		st.handleError(ValueExpected)
 		return false
 	}
 	if st.s.Token() != EOF {
-		st.handleError(EndOfFileExpected, nil, nil)
+		st.handleError(EndOfFileExpected)
 	}
 	return true
 }
@@ -232,28 +232,28 @@ func (st *visitState) scanNext() SyntaxKind {
 
 		switch st.s.TokenError() {
 		case ScanInvalidUnicode:
-			st.handleError(InvalidUnicode, nil, nil)
+			st.handleError(InvalidUnicode)
 		case ScanInvalidEscapeCharacter:
-			st.handleError(InvalidEscapeCharacter, nil, nil)
+			st.handleError(InvalidEscapeCharacter)
 		case ScanUnexpectedEndOfNumber:
-			st.handleError(UnexpectedEndOfNumber, nil, nil)
+			st.handleError(UnexpectedEndOfNumber)
 		case ScanUnexpectedEndOfComment:
-			st.handleError(UnexpectedEndOfComment, nil, nil)
+			st.handleError(UnexpectedEndOfComment)
 		case ScanUnexpectedEndOfString:
-			st.handleError(UnexpectedEndOfString, nil, nil)
+			st.handleError(UnexpectedEndOfString)
 		case ScanInvalidCharacter:
-			st.handleError(InvalidCharacter, nil, nil)
+			st.handleError(InvalidCharacter)
 		}
 
 		switch token {
 		case LineComment, BlockComment:
 			if st.cfg.disallowComments {
-				st.handleError(InvalidCommentToken, nil, nil)
+				st.handleError(InvalidCommentToken)
 			} else if st.v.OnComment != nil && st.skipped == 0 {
 				st.v.OnComment(st.span())
 			}
 		case Unknown:
-			st.handleError(InvalidSymbol, nil, nil)
+			st.handleError(InvalidSymbol)
 		case Trivia, LineBreak:
 		default:
 			return token
@@ -261,27 +261,17 @@ func (st *visitState) scanNext() SyntaxKind {
 	}
 }
 
-// handleError reports code, then skips until it has consumed a token in
-// skipUntilAfter or reached one in skipUntil.
-//
-// skipUntilAfter is only for parity with upstream; both callers are already at
-// EOF, so it never consumes anything.
-func (st *visitState) handleError(code ParseErrorCode, skipUntilAfter, skipUntil []SyntaxKind) {
+// handleError reports code, then skips to the next token in skipUntil.
+// Upstream also takes tokens to skip past, but only where parsing is already
+// at EOF, so that's left out.
+func (st *visitState) handleError(code ParseErrorCode, skipUntil ...SyntaxKind) {
 	if st.v.OnError != nil && st.skipped == 0 {
 		st.v.OnError(code, st.span())
 	}
-	if len(skipUntilAfter) == 0 && len(skipUntil) == 0 {
+	if len(skipUntil) == 0 {
 		return
 	}
-	token := st.s.Token()
-	for token != EOF {
-		if slices.Contains(skipUntilAfter, token) {
-			st.scanNext()
-			return
-		}
-		if slices.Contains(skipUntil, token) {
-			return
-		}
+	for token := st.s.Token(); token != EOF && !slices.Contains(skipUntil, token); {
 		token = st.scanNext()
 	}
 }
@@ -315,14 +305,14 @@ func (st *visitState) parseLiteral() bool {
 			if _, err := strconv.ParseFloat(raw, 64); err != nil {
 				var ne *strconv.NumError
 				if !errors.As(err, &ne) || ne.Err != strconv.ErrRange {
-					st.handleError(InvalidNumberFormat, nil, nil)
+					st.handleError(InvalidNumberFormat)
 					value = json.Number("0")
 				}
 			}
 		} else {
 			f, err := strconv.ParseFloat(raw, 64)
 			if err != nil {
-				st.handleError(InvalidNumberFormat, nil, nil)
+				st.handleError(InvalidNumberFormat)
 				f = 0
 			}
 			value = f
@@ -361,7 +351,7 @@ func (st *visitState) separator(sep string) {
 
 func (st *visitState) parseProperty() bool {
 	if st.s.Token() != StringLiteral {
-		st.handleError(PropertyNameExpected, nil, []SyntaxKind{CloseBrace, Comma})
+		st.handleError(PropertyNameExpected, CloseBrace, Comma)
 		return false
 	}
 	name := st.s.Value()
@@ -376,10 +366,10 @@ func (st *visitState) parseProperty() bool {
 		st.separator(":")
 		st.scanNext()
 		if !st.parseValue() {
-			st.handleError(ValueExpected, nil, []SyntaxKind{CloseBrace, Comma})
+			st.handleError(ValueExpected, CloseBrace, Comma)
 		}
 	} else {
-		st.handleError(ColonExpected, nil, []SyntaxKind{CloseBrace, Comma})
+		st.handleError(ColonExpected, CloseBrace, Comma)
 	}
 	st.path = st.path.parent
 	return true
@@ -393,7 +383,7 @@ func (st *visitState) parseObject() bool {
 	for st.s.Token() != CloseBrace && st.s.Token() != EOF {
 		if st.s.Token() == Comma {
 			if !needsComma {
-				st.handleError(ValueExpected, nil, nil)
+				st.handleError(ValueExpected)
 			}
 			st.separator(",")
 			st.scanNext()
@@ -401,17 +391,17 @@ func (st *visitState) parseObject() bool {
 				break
 			}
 		} else if needsComma {
-			st.handleError(CommaExpected, nil, nil)
+			st.handleError(CommaExpected)
 		}
 		if !st.parseProperty() {
-			st.handleError(ValueExpected, nil, []SyntaxKind{CloseBrace, Comma})
+			st.handleError(ValueExpected, CloseBrace, Comma)
 		}
 		needsComma = true
 	}
 
 	st.end(st.v.OnObjectEnd)
 	if st.s.Token() != CloseBrace {
-		st.handleError(CloseBraceExpected, []SyntaxKind{CloseBrace}, nil)
+		st.handleError(CloseBraceExpected)
 	} else {
 		st.scanNext()
 	}
@@ -428,7 +418,7 @@ func (st *visitState) parseArray() bool {
 	for st.s.Token() != CloseBracket && st.s.Token() != EOF {
 		if st.s.Token() == Comma {
 			if !needsComma {
-				st.handleError(ValueExpected, nil, nil)
+				st.handleError(ValueExpected)
 			}
 			st.separator(",")
 			st.scanNext()
@@ -436,7 +426,7 @@ func (st *visitState) parseArray() bool {
 				break
 			}
 		} else if needsComma {
-			st.handleError(CommaExpected, nil, nil)
+			st.handleError(CommaExpected)
 		}
 		if index++; index == 0 {
 			st.path = st.path.push(0)
@@ -444,7 +434,7 @@ func (st *visitState) parseArray() bool {
 			st.path = st.path.parent.push(index)
 		}
 		if !st.parseValue() {
-			st.handleError(ValueExpected, nil, []SyntaxKind{CloseBracket, Comma})
+			st.handleError(ValueExpected, CloseBracket, Comma)
 		}
 		needsComma = true
 	}
@@ -454,7 +444,7 @@ func (st *visitState) parseArray() bool {
 	}
 	st.end(st.v.OnArrayEnd)
 	if st.s.Token() != CloseBracket {
-		st.handleError(CloseBracketExpected, []SyntaxKind{CloseBracket}, nil)
+		st.handleError(CloseBracketExpected)
 	} else {
 		st.scanNext()
 	}

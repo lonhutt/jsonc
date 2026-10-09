@@ -458,10 +458,16 @@ var modifyGoldenTreeDivergence = map[string]bool{`{"a":}`: true, `{"a" 1}`: true
 //   - "range": Remove with an index outside the array, which upstream crashes
 //     on, answers by emptying the array, or turns into an inserted "undefined".
 //   - "negative": Modify with an index below -1, which upstream crashes on
-//     unless the array is empty and IsArrayInsertion is set.
+//     unless the array is empty and IsArrayInsertion is set, or doesn't exist
+//     yet.
 //   - "merge": Remove of the last element of a one-line array, where upstream
 //     keeps its last byte (`[1,2]` -> `[12]`).
 func arrayDivergence(text string, path Path, remove bool) string {
+	for _, seg := range path {
+		if i, ok := seg.(int); ok && i < -1 && !remove {
+			return "negative"
+		}
+	}
 	if len(path) == 0 {
 		return ""
 	}
@@ -765,4 +771,12 @@ func TestRemoveLastBeforeAComment(t *testing.T) {
 	assertRemove(t, "[1, 2 /* c */]", Path{1}, ModifyOptions{}, "[1/* c */]")
 	assertRemove(t, "[1,2/**/]", Path{1}, ModifyOptions{}, "[1/**/]")
 	assertRemove(t, `{"a":[1, 2 /*x*/]}`, Path{"a", 1}, ModifyOptions{}, `{"a":[1/*x*/]}`)
+}
+
+// An index below -1 is an error whether or not the array exists yet.
+func TestModifyNegativeIndexInNewArray(t *testing.T) {
+	if edits, err := Modify(`{}`, Path{"a", -5}, 1, modifyOpts()); err == nil {
+		t.Errorf("want an error, got %+v", edits)
+	}
+	assertModify(t, `{}`, Path{"a", -1}, 1, ModifyOptions{}, `{"a": [1]}`)
 }
